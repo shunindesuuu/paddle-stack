@@ -3,7 +3,7 @@
     "name": "Paddle Stack",
     "slug": "paddle-stack",
     "scheme": "paddlestack",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
