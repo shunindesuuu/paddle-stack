@@ -1,22 +1,47 @@
 {
-  "name": "android-apps",
+  "name": "paddle-stack",
   "version": "1.0.0",
-  "main": "index.ts",
+  "main": "expo-router/entry",
   "dependencies": {
+    "@expo-google-fonts/fredoka": "^0.4.1",
+    "@expo-google-fonts/outfit": "^0.4.3",
+    "@expo/vector-icons": "^15.0.2",
     "expo": "~57.0.7",
+    "expo-constants": "~57.0.6",
+    "expo-file-system": "~57.0.1",
+    "expo-intent-launcher": "~57.0.1",
+    "expo-linking": "~57.0.3",
+    "expo-router": "~57.0.7",
+    "expo-splash-screen": "~57.0.4",
+    "expo-sqlite": "~57.0.1",
     "expo-status-bar": "~57.0.1",
+    "expo-system-ui": "~57.0.1",
     "react": "19.2.3",
-    "react-native": "0.86.0"
+    "react-native": "0.86.0",
+    "react-native-gesture-handler": "~2.32.0",
+    "react-native-reanimated": "4.5.0",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "4.25.2"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
     "@types/react": "~19.2.2",
     "typescript": "~6.0.3"
   },
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web"
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "verify:build": "tsc -p tsconfig.scripts.json",
+    "verify:engine": "npm run verify:build && node .verify/scripts/verify-engine.js",
+    "verify:db": "npm run verify:build && node .verify/scripts/verify-db.js",
+    "verify": "npm run typecheck && npm run verify:engine && npm run verify:db",
+    "simulate": "npm run verify:build && node .verify/scripts/simulate-session.js"
   },
-  "private": true
+  "private": true,
+  "overrides": {
+    "react-dom": "19.2.3"
+  }
 }
