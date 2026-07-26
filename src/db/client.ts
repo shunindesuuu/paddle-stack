@@ -40,6 +40,16 @@ export function initDatabase(): void {
   // PRAGMA cannot take bound parameters; the version is a compile-time
   // constant so the interpolation is safe.
   sqlite.execSync(`PRAGMA user_version = ${applied};`);
+
+  // Defensive: a dev-client reload observed on one device left user_version
+  // at 6 without the migration 5->6 ALTER actually having landed, so the
+  // version alone was no longer proof the column existed. Self-heals instead
+  // of leaving that device permanently unable to write a dupr rating.
+  const playerCols = sqlite.getAllSync<{ name: string }>("PRAGMA table_info('players');");
+  if (!playerCols.some((c) => c.name === 'dupr')) {
+    sqlite.execSync('ALTER TABLE players ADD COLUMN dupr REAL;');
+  }
+
   initialised = true;
 }
 

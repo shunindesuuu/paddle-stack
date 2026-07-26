@@ -3,18 +3,20 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import { Alert, Linking, Platform, Text, View } from 'react-native';
 import { resetDatabase } from '../../src/db/client';
-import { listPlayers, listSessions } from '../../src/db/repo';
+import { DuprSettings, getDuprSettings, listPlayers, listSessions, setDuprSettings } from '../../src/db/repo';
 import { checkForUpdate, downloadAndInstallUpdate, UpdateManifest } from '../../src/update/updateChecker';
 import { ThemeMode, themedStyles, useTheme } from '../../src/ui/ThemeContext';
 import {
   Button,
   Card,
   Heading,
+  Input,
   Muted,
   Row,
   Screen,
   Segmented,
   Title,
+  ToggleRow,
 } from '../../src/ui/components';
 import { font, radius, space } from '../../src/ui/theme';
 
@@ -42,11 +44,45 @@ export default function SettingsScreen() {
   const [update, setUpdate] = useState<UpdateState>({ phase: 'idle' });
   const currentVersion = Constants.expoConfig?.version ?? '0.0.0';
 
-  const refresh = useCallback(
-    () => setCounts({ players: listPlayers(true).length, sessions: listSessions().length }),
-    []
-  );
+  const [dupr, setDupr] = useState<DuprSettings>(() => getDuprSettings());
+  const [beginnerText, setBeginnerText] = useState(() => String(dupr.brackets.beginnerMax));
+  const [intermediateText, setIntermediateText] = useState(() => String(dupr.brackets.intermediateMax));
+
+  const refresh = useCallback(() => {
+    setCounts({ players: listPlayers(true).length, sessions: listSessions().length });
+    const next = getDuprSettings();
+    setDupr(next);
+    setBeginnerText(String(next.brackets.beginnerMax));
+    setIntermediateText(String(next.brackets.intermediateMax));
+  }, []);
   useFocusEffect(useCallback(() => refresh(), [refresh]));
+
+  const toggleUseDupr = (v: boolean) => {
+    setDuprSettings({ useDupr: v });
+    setDupr(getDuprSettings());
+  };
+
+  const commitBeginnerMax = () => {
+    const n = Number(beginnerText);
+    if (!Number.isFinite(n) || n <= 0 || n >= dupr.brackets.intermediateMax) {
+      Alert.alert('Invalid bracket', 'The Beginner cutoff must be a positive number below the Advanced cutoff.');
+      setBeginnerText(String(dupr.brackets.beginnerMax));
+      return;
+    }
+    setDuprSettings({ beginnerMax: n });
+    setDupr(getDuprSettings());
+  };
+
+  const commitIntermediateMax = () => {
+    const n = Number(intermediateText);
+    if (!Number.isFinite(n) || n <= dupr.brackets.beginnerMax) {
+      Alert.alert('Invalid bracket', 'The Advanced cutoff must be a number above the Beginner cutoff.');
+      setIntermediateText(String(dupr.brackets.intermediateMax));
+      return;
+    }
+    setDuprSettings({ intermediateMax: n });
+    setDupr(getDuprSettings());
+  };
 
   const sendFeedback = () => {
     const version = Constants.expoConfig?.version ?? 'unknown';
@@ -122,6 +158,38 @@ export default function SettingsScreen() {
         </Muted>
         <View style={{ height: space.md }} />
         <Segmented value={mode} onChange={setMode} options={MODES} />
+      </Card>
+
+      <Card style={{ marginTop: space.lg }}>
+        <Heading>Skill rating method</Heading>
+        <ToggleRow
+          label="Use DUPR ratings"
+          hint="Players with a DUPR score are auto-placed into Beginner / Intermediate / Advanced using the brackets below. Players without a DUPR score keep working off their manually set tier."
+          value={dupr.useDupr}
+          onChange={toggleUseDupr}
+        />
+        {dupr.useDupr ? (
+          <>
+            <View style={{ height: space.md }} />
+            <Muted>Beginner below</Muted>
+            <View style={{ height: space.xs }} />
+            <Input
+              keyboardType="decimal-pad"
+              value={beginnerText}
+              onChangeText={setBeginnerText}
+              onEndEditing={commitBeginnerMax}
+            />
+            <View style={{ height: space.md }} />
+            <Muted>Advanced at or above</Muted>
+            <View style={{ height: space.xs }} />
+            <Input
+              keyboardType="decimal-pad"
+              value={intermediateText}
+              onChangeText={setIntermediateText}
+              onEndEditing={commitIntermediateMax}
+            />
+          </>
+        ) : null}
       </Card>
 
       <Card style={{ marginTop: space.lg }}>

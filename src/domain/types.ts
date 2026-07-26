@@ -20,10 +20,36 @@ export const TIER_LABEL: Record<Tier, string> = {
 
 export const TIERS: Tier[] = ['beginner', 'intermediate', 'advanced'];
 
+/** DUPR cutoffs used to auto-derive a tier from a rating. Both bounds are exclusive-below. */
+export type DuprBrackets = {
+  /** Ratings below this are Beginner. */
+  beginnerMax: number;
+  /** Ratings below this (and at/above beginnerMax) are Intermediate; at/above it, Advanced. */
+  intermediateMax: number;
+};
+
+export const DEFAULT_DUPR_BRACKETS: DuprBrackets = { beginnerMax: 3.0, intermediateMax: 4.0 };
+
+export function tierFromDupr(dupr: number, brackets: DuprBrackets): Tier {
+  if (dupr < brackets.beginnerMax) return 'beginner';
+  if (dupr < brackets.intermediateMax) return 'intermediate';
+  return 'advanced';
+}
+
 export type Player = {
   id: number;
   name: string;
+  /**
+   * Effective tier used for pairing and display. When DUPR mode is on and
+   * this player has a rating, it's `tierFromDupr(dupr, brackets)`; otherwise
+   * it falls back to `manualTier`, so a player with no DUPR score still gets
+   * a usable tier.
+   */
   tier: Tier;
+  /** Raw, always-editable tier stored on the player - the fallback above. */
+  manualTier: Tier;
+  /** Optional DUPR rating. Null means this player relies on `manualTier`. */
+  dupr: number | null;
   /** Soft-delete / archive flag so history keeps referencing the player. */
   archived: boolean;
   /**

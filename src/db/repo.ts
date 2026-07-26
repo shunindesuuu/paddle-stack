@@ -5,6 +5,8 @@
  */
 
 import {
+  DEFAULT_DUPR_BRACKETS,
+  DuprBrackets,
   Match,
   MatchMode,
   PlayHistory,
@@ -14,6 +16,7 @@ import {
   Tier,
   emptyHistory,
   pairKey,
+  tierFromDupr,
 } from '../domain/types';
 import { Strategy } from '../pairing/engine';
 import { db } from './driver';
@@ -27,6 +30,7 @@ type PlayerRow = {
   archived: number;
   created_at: number;
   linked_player_id: number | null;
+  dupr: number | null;
 };
 
 type SessionRow = {
@@ -55,11 +59,14 @@ export type Session = {
   honorLinks: boolean;
 };
 
-function toPlayer(r: PlayerRow): Player {
+function toPlayer(r: PlayerRow, dupr: DuprSettings): Player {
+  const manualTier = r.tier;
   return {
     id: r.id,
     name: r.name,
-    tier: r.tier,
+    tier: dupr.useDupr && r.dupr != null ? tierFromDupr(r.dupr, dupr.brackets) : manualTier,
+    manualTier,
+    dupr: r.dupr,
     archived: r.archived === 1,
     linkedPlayerId: r.linked_player_id,
   };
@@ -93,6 +100,52 @@ export function setSetting(key: string, value: string): void {
   );
 }
 
+// --- DUPR settings ------------------------------------------------------
+
+const DUPR_SETTING_KEYS = {
+  useDupr: 'use_dupr',
+  beginnerMax: 'dupr_beginner_max',
+  intermediateMax: 'dupr_intermediate_max',
+} as const;
+
+export type DuprSettings = { useDupr: boolean; brackets: DuprBrackets };
+
+function numSetting(key: string, fallback: number): number {
+  const raw = getSetting(key);
+  if (raw == null) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export function getDuprSettings(): DuprSettings {
+  return {
+    useDupr: getSetting(DUPR_SETTING_KEYS.useDupr) === '1',
+    brackets: {
+      beginnerMax: numSetting(DUPR_SETTING_KEYS.beginnerMax, DEFAULT_DUPR_BRACKETS.beginnerMax),
+      intermediateMax: numSetting(
+        DUPR_SETTING_KEYS.intermediateMax,
+        DEFAULT_DUPR_BRACKETS.intermediateMax
+      ),
+    },
+  };
+}
+
+export function setDuprSettings(patch: {
+  useDupr?: boolean;
+  beginnerMax?: number;
+  intermediateMax?: number;
+}): void {
+  if (patch.useDupr !== undefined) {
+    setSetting(DUPR_SETTING_KEYS.useDupr, patch.useDupr ? '1' : '0');
+  }
+  if (patch.beginnerMax !== undefined) {
+    setSetting(DUPR_SETTING_KEYS.beginnerMax, String(patch.beginnerMax));
+  }
+  if (patch.intermediateMax !== undefined) {
+    setSetting(DUPR_SETTING_KEYS.intermediateMax, String(patch.intermediateMax));
+  }
+}
+
 // --- players ----------------------------------------------------------------
 
 export function listPlayers(includeArchived = false): Player[] {
@@ -101,19 +154,47 @@ export function listPlayers(includeArchived = false): Player[] {
     : db.getAllSync<PlayerRow>(
         'SELECT * FROM players WHERE archived = 0 ORDER BY name COLLATE NOCASE;'
       );
-  return rows.map(toPlayer);
+  const dupr = getDuprSettings();
+  return rows.map((r) => toPlayer(r, dupr));
 }
 
-export function createPlayer(name: string, tier: Tier): Player {
-  const res = db.runSync('INSERT INTO players (name, tier) VALUES (?, ?);', [
+export function createPlayer(name: string, tier: Tier, dupr: number | null = null): Player {
+  const res = db.runSync('INSERT INTO players (name, tier, dupr) VALUES (?, ?, ?);', [
     name.trim(),
     tier,
+    dupr,
   ]);
-  return { id: res.lastInsertRowId, name: name.trim(), tier, archived: false, linkedPlayerId: null };
+  const settings = getDuprSettings();
+  const effectiveTier =
+    settings.useDupr && dupr != null ? tierFromDupr(dupr, settings.brackets) : tier;
+  return {
+    id: res.lastInsertRowId,
+    name: name.trim(),
+    tier: effectiveTier,
+    manualTier: tier,
+    dupr,
+    archived: false,
+    linkedPlayerId: null,
+  };
 }
 
-export function updatePlayer(id: number, name: string, tier: Tier): void {
-  db.runSync('UPDATE players SET name = ?, tier = ? WHERE id = ?;', [name.trim(), tier, id]);
+/**
+ * Updates name + tier, and optionally the DUPR rating. `dupr` is left
+ * `undefined` by callers that only ever touch tier (e.g. cycling the tier
+ * badge), so the player's existing rating isn't clobbered; pass `null`
+ * explicitly to clear it.
+ */
+export function updatePlayer(id: number, name: string, tier: Tier, dupr?: number | null): void {
+  if (dupr === undefined) {
+    db.runSync('UPDATE players SET name = ?, tier = ? WHERE id = ?;', [name.trim(), tier, id]);
+  } else {
+    db.runSync('UPDATE players SET name = ?, tier = ?, dupr = ? WHERE id = ?;', [
+      name.trim(),
+      tier,
+      dupr,
+      id,
+    ]);
+  }
 }
 
 export function setPlayerArchived(id: number, archived: boolean): void {
@@ -268,6 +349,7 @@ export function updateSessionSettings(
 }
 
 export function getSessionRoster(sessionId: number): Player[] {
+  const dupr = getDuprSettings();
   return db
     .getAllSync<PlayerRow>(
       `SELECT p.* FROM players p
@@ -276,7 +358,7 @@ export function getSessionRoster(sessionId: number): Player[] {
        ORDER BY p.name COLLATE NOCASE;`,
       [sessionId]
     )
-    .map(toPlayer);
+    .map((r) => toPlayer(r, dupr));
 }
 
 export function setSessionRoster(sessionId: number, playerIds: number[]): void {
@@ -537,8 +619,9 @@ export function playerStats(): PlayerStats[] {
      ORDER BY wins DESC, games DESC, p.name COLLATE NOCASE;`
   );
 
+  const dupr = getDuprSettings();
   return rows.map((r) => ({
-    player: toPlayer(r),
+    player: toPlayer(r, dupr),
     games: r.games,
     wins: r.wins ?? 0,
     losses: r.losses ?? 0,

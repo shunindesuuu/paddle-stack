@@ -6,7 +6,7 @@
  * statements. Entry N upgrades a database from version N to N+1.
  */
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const migrations: string[][] = [
   // 0 -> 1 : initial schema
@@ -111,6 +111,12 @@ export const migrations: string[][] = [
     `ALTER TABLE players ADD COLUMN linked_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL;`,
     `ALTER TABLE sessions ADD COLUMN honor_links INTEGER NOT NULL DEFAULT 1;`,
   ],
+  // 5 -> 6 : optional DUPR rating per player. When DUPR mode is on (a global
+  // setting, see settings keys `use_dupr`/`dupr_beginner_max`/
+  // `dupr_intermediate_max`) it's mapped through the configured brackets to
+  // derive an effective tier, so a player without a rating keeps working off
+  // their manually set tier.
+  [`ALTER TABLE players ADD COLUMN dupr REAL;`],
 ];
 
 /** Applies any migrations the database hasn't seen yet. */

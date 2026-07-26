@@ -1,15 +1,22 @@
 import { useFocusEffect } from 'expo-router';
-import React, { useCallback, useState } from 'react';
-import { Alert, Pressable, Text, View } from 'react-native';
+import React, { useCallback, useRef, useState } from 'react';
+import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
 import { TIERS, TIER_LABEL, Player, Tier } from '../../src/domain/types';
 
 /** Cycles a tier forward, wrapping past Advanced back to Beginner. */
 function nextTier(tier: Tier): Tier {
   return TIERS[(TIERS.indexOf(tier) + 1) % TIERS.length];
 }
+
+/** Trims trailing zeros so "3.50" reads as "3.5". */
+function formatDupr(n: number): string {
+  return String(Number(n.toFixed(2)));
+}
 import {
   createPlayer,
   deleteOrArchivePlayer,
+  DuprSettings,
+  getDuprSettings,
   linkPlayers,
   listPlayers,
   setPlayerArchived,
@@ -45,18 +52,26 @@ export default function PlayersScreen() {
   const [showArchived, setShowArchived] = useState(false);
 
   const [name, setName] = useState('');
-  const [tier, setTier] = useState<Tier>('intermediate');
+  const [manualTier, setManualTier] = useState<Tier>('intermediate');
+  const [duprText, setDuprText] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [linkingId, setLinkingId] = useState<number | null>(null);
+  const [duprSettings, setDuprSettingsState] = useState<DuprSettings>(() => getDuprSettings());
+  const scrollRef = useRef<ScrollView>(null);
+  const scrollToTop = () => scrollRef.current?.scrollTo({ y: 0, animated: true });
 
-  const refresh = useCallback(() => setPlayers(listPlayers(true)), []);
+  const refresh = useCallback(() => {
+    setPlayers(listPlayers(true));
+    setDuprSettingsState(getDuprSettings());
+  }, []);
   useFocusEffect(useCallback(() => refresh(), [refresh]));
 
   const visible = players.filter((p) => (showArchived ? true : !p.archived));
 
   const resetForm = () => {
     setName('');
-    setTier('intermediate');
+    setManualTier('intermediate');
+    setDuprText('');
     setEditingId(null);
   };
 
@@ -74,15 +89,28 @@ export default function PlayersScreen() {
       return;
     }
 
-    if (editingId != null) updatePlayer(editingId, trimmed, tier);
-    else createPlayer(trimmed, tier);
+    let dupr: number | null = null;
+    const durTrim = duprText.trim();
+    if (durTrim !== '') {
+      const n = Number(durTrim);
+      if (!Number.isFinite(n) || n <= 0) {
+        Alert.alert('Invalid DUPR rating', 'Enter a number like 3.75, or leave it blank.');
+        return;
+      }
+      dupr = n;
+    }
+
+    if (editingId != null) updatePlayer(editingId, trimmed, manualTier, dupr);
+    else createPlayer(trimmed, manualTier, dupr);
 
     resetForm();
     refresh();
   };
 
+  /** No-op when this player's badge is DUPR-derived: cycling the fallback
+   * tier wouldn't visibly change anything until their rating is cleared. */
   const cycleTier = (p: Player) => {
-    updatePlayer(p.id, p.name, nextTier(p.tier));
+    updatePlayer(p.id, p.name, nextTier(p.manualTier));
     refresh();
   };
 
@@ -106,7 +134,9 @@ export default function PlayersScreen() {
   const startEdit = (p: Player) => {
     setEditingId(p.id);
     setName(p.name);
-    setTier(p.tier);
+    setManualTier(p.manualTier);
+    setDuprText(p.dupr != null ? formatDupr(p.dupr) : '');
+    scrollToTop();
   };
 
   const remove = (p: Player) => {
@@ -127,9 +157,13 @@ export default function PlayersScreen() {
   };
 
   return (
-    <Screen>
+    <Screen scrollRef={scrollRef}>
       <Title>Players</Title>
-      <Muted>Tier decides how the app balances doubles teams. Tap a player's tier badge to change it.</Muted>
+      <Muted>
+        {duprSettings.useDupr
+          ? "DUPR ratings set a player's tier automatically using the brackets in Settings. Players without a DUPR score fall back to the tier below."
+          : "Tier decides how the app balances doubles teams. Tap a player's tier badge to change it."}
+      </Muted>
 
       <Card style={{ marginTop: space.lg }}>
         <Heading>{editingId != null ? 'Edit player' : 'Add player'}</Heading>
@@ -142,13 +176,26 @@ export default function PlayersScreen() {
           onSubmitEditing={submit}
         />
         <View style={{ height: space.md }} />
-        <Muted>Skill tier</Muted>
+        <Muted>{duprSettings.useDupr ? 'Skill tier (fallback when no DUPR)' : 'Skill tier'}</Muted>
         <View style={{ height: space.sm }} />
         <Segmented
-          value={tier}
-          onChange={setTier}
+          value={manualTier}
+          onChange={setManualTier}
           options={TIERS.map((t) => ({ value: t, label: TIER_LABEL[t] }))}
         />
+        {duprSettings.useDupr ? (
+          <>
+            <View style={{ height: space.md }} />
+            <Muted>DUPR rating (optional)</Muted>
+            <View style={{ height: space.sm }} />
+            <Input
+              placeholder="e.g. 3.75"
+              value={duprText}
+              onChangeText={setDuprText}
+              keyboardType="decimal-pad"
+            />
+          </>
+        ) : null}
         <View style={{ height: space.lg }} />
         <Row gap={space.sm}>
           <Button
@@ -253,7 +300,7 @@ export default function PlayersScreen() {
                   <Text style={[styles.name, { flex: 1, paddingRight: space.sm }]} numberOfLines={1}>
                     {p.name}
                   </Text>
-                  {p.archived ? (
+                  {p.archived || (duprSettings.useDupr && p.dupr != null) ? (
                     <TierBadge tier={p.tier} small />
                   ) : (
                     <Pressable
@@ -272,17 +319,27 @@ export default function PlayersScreen() {
                     <View style={{ height: space.xs }} />
                     <Text style={styles.archivedTag}>archived</Text>
                   </>
-                ) : p.linkedPlayerId != null ? (
+                ) : (
                   <>
-                    <View style={{ height: space.xs }} />
-                    <Row gap={4}>
-                      <Icon name="link" size={12} color={c.accentInk} />
-                      <Text style={styles.linkedTag} numberOfLines={1}>
-                        Linked with {partnerName(p.linkedPlayerId)}
-                      </Text>
-                    </Row>
+                    {p.linkedPlayerId != null ? (
+                      <>
+                        <View style={{ height: space.xs }} />
+                        <Row gap={4}>
+                          <Icon name="link" size={12} color={c.accentInk} />
+                          <Text style={styles.linkedTag} numberOfLines={1}>
+                            Linked with {partnerName(p.linkedPlayerId)}
+                          </Text>
+                        </Row>
+                      </>
+                    ) : null}
+                    {duprSettings.useDupr && p.dupr != null ? (
+                      <>
+                        <View style={{ height: space.xs }} />
+                        <Muted>DUPR {formatDupr(p.dupr)}</Muted>
+                      </>
+                    ) : null}
                   </>
-                ) : null}
+                )}
 
                 <View style={{ height: space.sm }} />
                 <Row gap={space.xs} style={{ justifyContent: 'flex-end' }}>
@@ -300,7 +357,10 @@ export default function PlayersScreen() {
                   ) : (
                     <>
                       <Pressable
-                        onPress={() => setLinkingId(p.id)}
+                        onPress={() => {
+                          setLinkingId(p.id);
+                          scrollToTop();
+                        }}
                         style={[styles.iconBtn, p.linkedPlayerId != null && styles.iconBtnActive]}
                         accessibilityLabel={
                           p.linkedPlayerId != null

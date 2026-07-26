@@ -30,10 +30,13 @@ export function Screen({
   children,
   scroll = true,
   footer,
+  scrollRef,
 }: {
   children: React.ReactNode;
   scroll?: boolean;
   footer?: React.ReactNode;
+  /** Lets a screen scroll itself back to top, e.g. to surface a panel that just opened above a long list. */
+  scrollRef?: React.RefObject<ScrollView | null>;
 }) {
   const r = useResponsive();
   const styles = useStyles();
@@ -48,6 +51,7 @@ export function Screen({
     <SafeAreaView style={styles.screen} edges={['top', 'left', 'right']}>
       {scroll ? (
         <ScrollView
+          ref={scrollRef}
           contentContainerStyle={[inner, { paddingBottom: space.xxl }]}
           keyboardShouldPersistTaps="handled"
         >

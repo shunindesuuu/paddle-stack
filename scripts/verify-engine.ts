@@ -19,6 +19,8 @@ const mk = (id: number, name: string, tier: Tier, linkedPlayerId: number | null 
   id,
   name,
   tier,
+  manualTier: tier,
+  dupr: null,
   archived: false,
   linkedPlayerId,
 });

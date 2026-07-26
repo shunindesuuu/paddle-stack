@@ -19,10 +19,12 @@ import {
   deleteSession,
   endSession,
   getActiveSession,
+  getDuprSettings,
   getSession,
   getSessionRoster,
   getSetting,
   setSetting,
+  setDuprSettings,
   linkPlayers,
   listPlayers,
   listSessions,
@@ -473,6 +475,43 @@ check(
     'cascade still deletes matches after rebuild',
     legacy.getAllSync('SELECT * FROM matches;').length === 0
   );
+}
+
+// --- DUPR ---------------------------------------------------------------
+
+{
+  check('DUPR mode is off by default', getDuprSettings().useDupr === false);
+
+  const rated = createPlayer('Ivy', 'beginner', 3.5);
+  const unrated = createPlayer('Jax', 'beginner');
+
+  check(
+    'with DUPR mode off, a rated player still uses their manual tier',
+    listPlayers().find((p) => p.id === rated.id)?.tier === 'beginner'
+  );
+
+  setDuprSettings({ useDupr: true }); // defaults: beginner < 3.0, advanced >= 4.0
+  const ivyOn = listPlayers().find((p) => p.id === rated.id)!;
+  check('3.5 DUPR lands in the default intermediate bracket', ivyOn.tier === 'intermediate');
+  check('manual tier is preserved underneath the derived one', ivyOn.manualTier === 'beginner');
+
+  const jaxOn = listPlayers().find((p) => p.id === unrated.id)!;
+  check('a player with no DUPR rating still falls back to their manual tier', jaxOn.tier === 'beginner');
+
+  setDuprSettings({ beginnerMax: 2, intermediateMax: 3 });
+  const ivyShifted = listPlayers().find((p) => p.id === rated.id)!;
+  check('moving the brackets re-derives the tier', ivyShifted.tier === 'advanced');
+
+  updatePlayer(rated.id, 'Ivy', 'advanced'); // no dupr arg: rating must survive
+  const ivyAfterTierOnlyUpdate = listPlayers().find((p) => p.id === rated.id)!;
+  check('updatePlayer without a dupr arg leaves the rating untouched', ivyAfterTierOnlyUpdate.dupr === 3.5);
+
+  updatePlayer(rated.id, 'Ivy', 'advanced', null);
+  const ivyCleared = listPlayers().find((p) => p.id === rated.id)!;
+  check('updatePlayer(..., null) clears the rating', ivyCleared.dupr === null);
+  check('once cleared, the manual tier takes back over', ivyCleared.tier === 'advanced');
+
+  setDuprSettings({ useDupr: false, beginnerMax: 3.0, intermediateMax: 4.0 });
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
