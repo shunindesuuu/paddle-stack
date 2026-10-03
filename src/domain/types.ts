@@ -80,12 +80,24 @@ export type Match = {
   /**
    * Which side won, or null while the match is unplayed.
    *
-   * Deliberately not a score: mid-session nobody wants to type two numbers on
-   * a phone, and nothing in the app consumes the margin - only who won feeds
-   * the leaderboard.
+   * Stays the source of truth for W/L even when scores are recorded, so the
+   * quick "tap the cup" path costs one tap and never needs a keyboard.
    */
   winner: Team | null;
+  /**
+   * Points scored, when someone bothered to type them in. Null means the
+   * result was recorded as a bare win, which is still perfectly valid - the
+   * standings just can't use this match for a points tiebreak.
+   */
+  scoreA: number | null;
+  scoreB: number | null;
 };
+
+/** Higher score wins; an equal or incomplete score decides nothing. */
+export function winnerFromScores(a: number | null, b: number | null): Team | null {
+  if (a == null || b == null || a === b) return null;
+  return a > b ? 'A' : 'B';
+}
 
 export type Round = {
   /** 1-based round number within its session. */

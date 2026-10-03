@@ -6,6 +6,7 @@
 import React from 'react';
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   ScrollView,
   StyleProp,
@@ -17,6 +18,7 @@ import {
   View,
   ViewStyle,
 } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { TIER_LABEL, Tier } from '../domain/types';
 import { Icon } from './Icon';
@@ -131,21 +133,32 @@ export function GridCell({
   children,
   columns,
   gap = space.sm,
+  layout,
+  entering,
+  exiting,
 }: {
   children: React.ReactNode;
   columns: number;
   gap?: number;
+  /** Reanimated presets from `./motion`; omit for a plain, unanimated cell. */
+  layout?: React.ComponentProps<typeof Animated.View>['layout'];
+  entering?: React.ComponentProps<typeof Animated.View>['entering'];
+  exiting?: React.ComponentProps<typeof Animated.View>['exiting'];
 }) {
+  const style = {
+    width: `${100 / columns}%` as const,
+    paddingHorizontal: gap / 2,
+    paddingBottom: gap,
+  };
+
+  // Only pay for an animated node where a screen actually asked for motion -
+  // court grids re-render on every score keystroke.
+  if (!layout && !entering && !exiting) return <View style={style}>{children}</View>;
+
   return (
-    <View
-      style={{
-        width: `${100 / columns}%`,
-        paddingHorizontal: gap / 2,
-        paddingBottom: gap,
-      }}
-    >
+    <Animated.View style={style} layout={layout} entering={entering} exiting={exiting}>
       {children}
-    </View>
+    </Animated.View>
   );
 }
 
@@ -156,9 +169,15 @@ export function Title({ children }: { children: React.ReactNode }) {
   return <Text style={styles.title}>{children}</Text>;
 }
 
-export function Heading({ children }: { children: React.ReactNode }) {
+export function Heading({
+  children,
+  style,
+}: {
+  children: React.ReactNode;
+  style?: StyleProp<TextStyle>;
+}) {
   const styles = useStyles();
-  return <Text style={styles.heading}>{children}</Text>;
+  return <Text style={[styles.heading, style]}>{children}</Text>;
 }
 
 export function Muted({
@@ -264,6 +283,59 @@ export function Input(props: TextInputProps) {
   return (
     <TextInput placeholderTextColor={c.textFaint} {...props} style={[styles.input, props.style]} />
   );
+}
+
+/**
+ * Filter box for the player lists, which get long enough that scrolling to
+ * find one name is the slow part of checking people in.
+ *
+ * Carries its own clear button because on Android there is no built-in one,
+ * and a stale filter silently hiding most of the roster is a confusing state
+ * to be stuck in.
+ */
+export function SearchField({
+  value,
+  onChangeText,
+  placeholder = 'Search players',
+}: {
+  value: string;
+  onChangeText: (v: string) => void;
+  placeholder?: string;
+}) {
+  const { c } = useTheme();
+  const styles = useStyles();
+  return (
+    <View style={styles.searchWrap}>
+      <Icon name="search" size={17} color={c.textFaint} />
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={c.textFaint}
+        autoCapitalize="none"
+        autoCorrect={false}
+        returnKeyType="search"
+        accessibilityLabel={placeholder}
+        style={styles.searchInput}
+      />
+      {value.length > 0 ? (
+        <Pressable
+          onPress={() => onChangeText('')}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel="Clear search"
+        >
+          <Icon name="remove" size={17} color={c.textDim} />
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+/** Case-insensitive substring match, the only kind of search a roster needs. */
+export function matchesSearch(name: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  return q === '' || name.toLowerCase().includes(q);
 }
 
 /** Horizontal segmented picker; wraps rather than scrolls so nothing hides. */
@@ -397,6 +469,86 @@ export function TierBadge({ tier, small }: { tier: Tier; small?: boolean }) {
   );
 }
 
+/**
+ * Full-height dialog for a task that shouldn't be scrolled past - picking a
+ * roster out of a long list, for instance, where an inline grid pushes
+ * everything else off the screen.
+ *
+ * The body scrolls inside a fixed frame so the title and the confirm button
+ * stay put no matter how many players there are.
+ */
+export function Sheet({
+  visible,
+  title,
+  subtitle,
+  onClose,
+  headerAction,
+  footer,
+  children,
+}: {
+  visible: boolean;
+  title: string;
+  subtitle?: string;
+  onClose: () => void;
+  /** Optional control on the title row, e.g. "Select all". */
+  headerAction?: React.ReactNode;
+  footer?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const { c } = useTheme();
+  const styles = useStyles();
+  const r = useResponsive();
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <View style={styles.sheetBackdrop}>
+        <SafeAreaView style={styles.sheetFrame} edges={['top', 'bottom', 'left', 'right']}>
+          <View
+            style={[
+              styles.sheetInner,
+              { maxWidth: r.maxContentWidth, paddingHorizontal: r.gutter },
+            ]}
+          >
+            <Row style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <View style={{ flex: 1, paddingRight: space.md }}>
+                <Text style={styles.sheetTitle}>{title}</Text>
+                {subtitle ? <Text style={styles.muted}>{subtitle}</Text> : null}
+              </View>
+              <Pressable
+                onPress={onClose}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel="Close"
+                style={styles.sheetClose}
+              >
+                <Icon name="remove" size={20} color={c.textDim} />
+              </Pressable>
+            </Row>
+
+            {headerAction ? <View style={{ marginTop: space.sm }}>{headerAction}</View> : null}
+
+            <ScrollView
+              style={{ flex: 1, marginTop: space.md }}
+              contentContainerStyle={{ paddingBottom: space.lg }}
+              keyboardShouldPersistTaps="handled"
+            >
+              {children}
+            </ScrollView>
+
+            {footer ? <View style={styles.sheetFooter}>{footer}</View> : null}
+          </View>
+        </SafeAreaView>
+      </View>
+    </Modal>
+  );
+}
+
 export function EmptyState({
   title,
   body,
@@ -520,6 +672,42 @@ const useStyles = themedStyles(({ c, font, family }) => ({
     alignSelf: 'flex-start',
   },
   badgeText: { fontSize: font.xs, fontFamily: family.bold, letterSpacing: 0.3 },
+  searchWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    backgroundColor: c.surfaceAlt,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.border,
+    paddingHorizontal: space.md,
+    minHeight: 48,
+  },
+  searchInput: {
+    flex: 1,
+    color: c.text,
+    fontSize: font.md,
+    fontFamily: family.regular,
+    paddingVertical: space.sm,
+  },
+  sheetBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)' },
+  sheetFrame: { flex: 1, backgroundColor: c.bg, marginTop: space.xxl },
+  sheetInner: { flex: 1, width: '100%', alignSelf: 'center', paddingTop: space.lg },
+  sheetTitle: { color: c.text, fontSize: font.xl, fontFamily: family.display },
+  sheetClose: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: c.surfaceAlt,
+  },
+  sheetFooter: {
+    borderTopWidth: 1,
+    borderTopColor: c.border,
+    paddingTop: space.md,
+    paddingBottom: space.sm,
+  },
   empty: {
     alignItems: 'center',
     paddingVertical: space.xxl * 1.5,

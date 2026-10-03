@@ -1,5 +1,5 @@
-import React from 'react';
-import { Pressable, Text, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Pressable, Text, TextInput, View } from 'react-native';
 import { Match, Player, TIER_LABEL, Team } from '../domain/types';
 import { SlotRef } from '../pairing/engine';
 import { Icon } from './Icon';
@@ -14,7 +14,10 @@ function sameSlot(a: SlotRef | null, b: SlotRef): boolean {
   return false;
 }
 
-/** A tappable player slot. Tapping two slots in a row swaps them. */
+/**
+ * A tappable player slot. Tapping selects it; the session screen then shows
+ * what can be done with the selection (swap, sub, remove) in its action bar.
+ */
 export function Slot({
   player,
   refSlot,
@@ -41,11 +44,9 @@ export function Slot({
       onPress={disabled ? undefined : () => onPress(refSlot)}
       disabled={disabled}
       accessibilityRole="button"
-      accessibilityLabel={
-        player
-          ? `${player.name}, ${TIER_LABEL[player.tier]}${isSelected ? ', selected for swap' : ''}`
-          : 'Empty slot'
-      }
+      accessibilityState={{ selected: isSelected, disabled }}
+      accessibilityLabel={player ? `${player.name}, ${TIER_LABEL[player.tier]}` : 'Empty slot'}
+      accessibilityHint={disabled ? undefined : 'Selects this player to swap, sub, or remove'}
       style={({ pressed }) => [
         styles.slot,
         { borderColor: isSelected ? c.accentEdge : c.border },
@@ -64,12 +65,71 @@ export function Slot({
   );
 }
 
+/**
+ * One team's points.
+ *
+ * Holds a draft string rather than writing on every keystroke: a half-typed
+ * "1" on the way to "11" would otherwise be saved as a real score and flip
+ * the winner mid-entry. The value is committed on blur and re-seeded whenever
+ * the stored score changes underneath (tapping the cup clears it).
+ */
+function ScoreBox({
+  value,
+  onCommit,
+  editable,
+  label,
+}: {
+  value: number | null;
+  onCommit: (next: number | null) => void;
+  editable: boolean;
+  label: string;
+}) {
+  const { c } = useTheme();
+  const styles = useStyles();
+  const asText = (n: number | null) => (n == null ? '' : String(n));
+  const [draft, setDraft] = useState(asText(value));
+
+  useEffect(() => setDraft(asText(value)), [value]);
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (trimmed === '') {
+      onCommit(null);
+      return;
+    }
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < 0) {
+      setDraft(asText(value)); // reject junk rather than storing it
+      return;
+    }
+    onCommit(n);
+  };
+
+  return (
+    <TextInput
+      value={draft}
+      onChangeText={setDraft}
+      onBlur={commit}
+      onEndEditing={commit}
+      editable={editable}
+      keyboardType="number-pad"
+      returnKeyType="done"
+      maxLength={3}
+      placeholder="–"
+      placeholderTextColor={c.textFaint}
+      accessibilityLabel={label}
+      style={[styles.scoreBox, !editable && { opacity: 0.6 }]}
+    />
+  );
+}
+
 export function MatchCard({
   match,
   players,
   selected,
   onSlotPress,
   onWinnerChange,
+  onScoreChange,
   editable = true,
   allowSwap = true,
 }: {
@@ -78,6 +138,8 @@ export function MatchCard({
   selected: SlotRef | null;
   onSlotPress: (ref: SlotRef) => void;
   onWinnerChange: (winner: Team | null) => void;
+  /** Both sides at once, since the winner is derived from the pair. */
+  onScoreChange?: (scoreA: number | null, scoreB: number | null) => void;
   /** Gates the winner button - correcting a result stays useful in history. */
   editable?: boolean;
   /** Gates player swapping - only makes sense for the round in progress. */
@@ -86,6 +148,12 @@ export function MatchCard({
   const { c } = useTheme();
   const styles = useStyles();
   const decided = match.winner != null;
+  const scored = match.scoreA != null || match.scoreB != null;
+  const showScores = !!onScoreChange;
+  // Both sides typed in is what makes a result real. Leaving the cup live
+  // before that gives an easy path to a scoreless win, and every one of those
+  // is a match the standings can't use to break a tie.
+  const complete = match.scoreA != null && match.scoreB != null;
 
   const teamRow = (team: Team) => {
     const ids = team === 'A' ? match.teamA : match.teamB;
@@ -115,17 +183,41 @@ export function MatchCard({
           ))}
         </View>
 
+        {showScores ? (
+          <ScoreBox
+            value={team === 'A' ? match.scoreA : match.scoreB}
+            editable={editable}
+            label={`Points for team ${team}`}
+            onCommit={(next) =>
+              onScoreChange!(
+                team === 'A' ? next : match.scoreA,
+                team === 'B' ? next : match.scoreB
+              )
+            }
+          />
+        ) : null}
+
+        {/* With scores driving the result the cup becomes a readout: it lights
+            up on whichever side the points decided, and only the winning one
+            takes a tap - which clears the result so a mistyped score is one
+            tap from being re-entered. Without score entry it stays the plain
+            tap-to-pick-a-winner control it has always been. */}
         <Pressable
-          // Tapping the winner again clears it, so a mis-tap is one tap to undo
-          // rather than a dead end.
-          onPress={() => onWinnerChange(won ? null : team)}
-          disabled={!editable}
+          onPress={() => onWinnerChange(showScores ? null : won ? null : team)}
+          disabled={!editable || (showScores && !won)}
           accessibilityRole="button"
-          accessibilityState={{ selected: won }}
-          accessibilityLabel={won ? `Team ${team} won, tap to clear` : `Mark team ${team} as winner`}
+          accessibilityState={{ selected: won, disabled: showScores && !won }}
+          accessibilityLabel={
+            won
+              ? `Team ${team} won, tap to clear this result`
+              : showScores
+                ? 'Type both scores to record a result'
+                : `Mark team ${team} as winner`
+          }
           style={({ pressed }) => [
             styles.winBtn,
             won && { backgroundColor: c.accent, borderColor: c.accent },
+            showScores && !complete && { opacity: 0.4 },
             pressed && { opacity: 0.75 },
           ]}
         >
@@ -135,13 +227,19 @@ export function MatchCard({
     );
   };
 
+  const status = () => {
+    if (scored && decided) return `Final ${match.scoreA}-${match.scoreB}`;
+    if (decided) return 'Result in';
+    if (complete) return 'Tied - nobody wins yet';
+    if (scored) return 'Add the other score';
+    return showScores ? 'Type both scores' : 'Tap the cup to pick a winner';
+  };
+
   return (
     <View style={styles.card}>
       <View style={styles.header}>
         <Text style={styles.court}>Court {match.court + 1}</Text>
-        <Text style={decided ? styles.final : styles.pending}>
-          {decided ? 'Result in' : 'Tap the cup to pick a winner'}
-        </Text>
+        <Text style={decided ? styles.final : styles.pending}>{status()}</Text>
       </View>
       {teamRow('A')}
       <Text style={styles.vs}>vs</Text>
@@ -190,6 +288,19 @@ const useStyles = themedStyles(({ c, font, family }) => ({
   },
   tierDot: { width: 8, height: 8, borderRadius: 4 },
   slotName: { color: c.text, fontSize: font.sm, fontFamily: family.semibold, flex: 1 },
+  scoreBox: {
+    width: 54,
+    minHeight: 52,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.surfaceAlt,
+    color: c.text,
+    fontSize: font.lg,
+    fontFamily: family.display,
+    textAlign: 'center',
+    paddingVertical: space.xs,
+  },
   winBtn: {
     width: 52,
     height: 52,

@@ -14,10 +14,12 @@
 
 import React from 'react';
 import { Pressable, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { Match, Player, Round } from '../domain/types';
 import { Icon } from './Icon';
+import { rowLayout, rowOut } from './motion';
 import { themedStyles, useTheme } from './ThemeContext';
-import { Button, Grid, GridCell, Row } from './components';
+import { Button, Grid, GridCell, LinkButton, Row } from './components';
 import { radius, space } from './theme';
 
 export type QueueEntry = {
@@ -91,54 +93,170 @@ export function EmptyCourtCard({ court }: { court: number }) {
  * as each finishes rather than the whole group advancing together - there's
  * no shared "next round" left to preview, just who's up.
  *
- * When `onPress` is given (a court player is already selected), the chips
- * become tappable so someone waiting can be subbed straight onto that slot -
- * the same motion whether it's a tactical swap or a mid-session substitution
- * for a player who just left.
+ * Sits below the courts: the games in progress are what the organiser is
+ * looking for, this is the supporting cast. Every chip is tappable - selecting
+ * someone waiting works the same as selecting someone on court, and either
+ * order (waiting first or court first) ends in the same substitution.
  */
 export function WaitingQueue({
   queue,
+  title = 'Waiting for a court',
+  selectedId,
+  subbing,
   onPress,
 }: {
   queue: QueueEntry[];
-  onPress?: (playerId: number) => void;
+  title?: string;
+  /** The waiting player currently selected, if any. */
+  selectedId: number | null;
+  /** True while a court player is selected, so a tap here subs that chip in. */
+  subbing: boolean;
+  onPress: (playerId: number) => void;
 }) {
   const { c } = useTheme();
   const styles = useStyles();
   if (queue.length === 0) return null;
-  const selectable = !!onPress;
+
+  const label = subbing ? `${title} · tap someone to sub them in` : title;
 
   return (
     <View style={{ marginTop: space.lg }}>
       <Text style={styles.waitingLabel}>
-        {selectable ? 'Waiting · tap someone to sub them in' : 'Waiting for a court'} · {queue.length}
+        {label} · {queue.length}
       </Text>
       <View style={styles.waitingRow}>
         {queue.map((q, i) => {
-          const chip = (
-            <View style={[styles.chip, selectable && { borderColor: c.accentEdge }]}>
-              <Text style={styles.chipPos}>{i + 1}</Text>
-              <Text style={styles.chipName} numberOfLines={1}>
-                {q.player.name}
-              </Text>
-              <Text style={styles.chipGames}>{q.games}g</Text>
-            </View>
-          );
-          return selectable ? (
-            <Pressable
-              key={q.player.id}
-              onPress={() => onPress!(q.player.id)}
-              hitSlop={6}
-              accessibilityRole="button"
-              accessibilityLabel={`Sub in ${q.player.name}`}
-            >
-              {chip}
-            </Pressable>
-          ) : (
-            <View key={q.player.id}>{chip}</View>
+          const isSelected = q.player.id === selectedId;
+          return (
+            // The queue reorders constantly as games finish, so animating the
+            // layout keeps a name you were tracking followable.
+            <Animated.View key={q.player.id} layout={rowLayout} exiting={rowOut}>
+              <Pressable
+                onPress={() => onPress(q.player.id)}
+                hitSlop={4}
+                accessibilityRole="button"
+                accessibilityState={{ selected: isSelected }}
+                accessibilityLabel={`${q.player.name}, waiting, ${q.games} games played`}
+                accessibilityHint={
+                  subbing ? 'Subs this player in' : 'Selects this player to sub in or remove'
+                }
+                style={({ pressed }) => [
+                  styles.chip,
+                  (subbing || isSelected) && { borderColor: c.accentEdge },
+                  isSelected && { backgroundColor: c.accentWash },
+                  pressed && { opacity: 0.75 },
+                ]}
+              >
+                <Text style={styles.chipPos}>{i + 1}</Text>
+                <Text style={styles.chipName} numberOfLines={1}>
+                  {q.player.name}
+                </Text>
+                <Text style={styles.chipGames}>{q.games}g</Text>
+              </Pressable>
+            </Animated.View>
           );
         })}
       </View>
+    </View>
+  );
+}
+
+/**
+ * Continuous play's queue of matchups formed ahead of time, in the order
+ * courts will take them. At open play - ten or so people per court - "when am
+ * I up?" is the question of the night, and a flat waiting list can't answer
+ * it. Each entry is what the next free court will actually play, whichever
+ * court that turns out to be, so there's no court number on it.
+ *
+ * Names are tappable like any waiting player: select one to sub them onto a
+ * court or remove them, and the queue re-forms around the gap.
+ */
+export function NextMatchups({
+  matches,
+  players,
+  columns,
+  selectedId,
+  subbing,
+  onPress,
+  onShuffle,
+}: {
+  matches: Match[];
+  players: Map<number, Player>;
+  /** Same column count as the court grid, so tablets lay these out alike. */
+  columns: number;
+  selectedId: number | null;
+  subbing: boolean;
+  onPress: (playerId: number) => void;
+  onShuffle: () => void;
+}) {
+  const { c } = useTheme();
+  const styles = useStyles();
+  if (matches.length === 0) return null;
+
+  const team = (ids: number[], color: string, game: number) => (
+    <View style={[styles.queuedTeam, { borderLeftColor: color }]}>
+      {ids.map((id) => {
+        const p = players.get(id);
+        const isSelected = id === selectedId;
+        return (
+          <Pressable
+            key={id}
+            onPress={() => onPress(id)}
+            hitSlop={4}
+            accessibilityRole="button"
+            accessibilityState={{ selected: isSelected }}
+            accessibilityLabel={`${p?.name ?? 'Player'}, in up-next game ${game}`}
+            accessibilityHint={
+              subbing ? 'Subs this player in' : 'Selects this player to sub in or remove'
+            }
+            style={({ pressed }) => [
+              styles.chip,
+              (subbing || isSelected) && { borderColor: c.accentEdge },
+              isSelected && { backgroundColor: c.accentWash },
+              pressed && { opacity: 0.75 },
+            ]}
+          >
+            <Text style={[styles.chipName, styles.queuedName]} numberOfLines={1}>
+              {p?.name ?? '—'}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+
+  return (
+    <View style={{ marginTop: space.xl }}>
+      <Row style={{ justifyContent: 'space-between' }}>
+        <Text style={styles.title}>Up next</Text>
+        <LinkButton label="Shuffle" onPress={onShuffle} />
+      </Row>
+      <View style={{ height: space.sm }} />
+      <Grid gap={space.md}>
+        {matches.map((m, i) => (
+          <GridCell
+            key={[...m.teamA, ...m.teamB].join('-')}
+            columns={columns}
+            gap={space.md}
+            layout={rowLayout}
+            exiting={rowOut}
+          >
+            <View style={styles.nextCard}>
+              <Text style={styles.courtLabel}>
+                {i === 0 ? 'Next free court' : `Game ${i + 1} in line`}
+              </Text>
+              {/* Side by side rather than stacked: at open play there can be
+                  five or six of these queued, and halving each one's height
+                  keeps the courts and the queue within a short scroll. */}
+              <View style={styles.queuedRow}>
+                {team(m.teamA, c.teamA, i + 1)}
+                <Text style={styles.vs}>vs</Text>
+                {team(m.teamB, c.teamB, i + 1)}
+              </View>
+            </View>
+          </GridCell>
+        ))}
+      </Grid>
     </View>
   );
 }
@@ -260,6 +378,11 @@ const useStyles = themedStyles(({ c, font, family }) => ({
     letterSpacing: 0.4,
   },
   waitingRow: { flexDirection: 'row', flexWrap: 'wrap', gap: space.xs, marginTop: space.sm },
+  queuedRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  queuedTeam: { flex: 1, gap: space.xs, borderLeftWidth: 3, paddingLeft: space.sm },
+  // Read from arm's length by whoever's checking if they're up, so a step
+  // larger than the waiting chips, and free to use the column's width.
+  queuedName: { fontSize: font.sm, maxWidth: undefined, flexShrink: 1 },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -267,7 +390,10 @@ const useStyles = themedStyles(({ c, font, family }) => ({
     backgroundColor: c.surfaceAlt,
     borderRadius: radius.pill,
     paddingVertical: 5,
-    paddingHorizontal: space.sm,
+    paddingHorizontal: space.md,
+    // Tapped mid-game to sub someone in, so sized as a real touch target
+    // (40 + hitSlop clears 48dp) rather than as a passive label.
+    minHeight: 40,
     borderWidth: 1,
     borderColor: c.border,
   },

@@ -395,6 +395,8 @@ export function generateRound(opts: GenerateOptions): GenerateResult {
       teamA: m.teamA.map((p) => p.id),
       teamB: m.teamB.map((p) => p.id),
       winner: null,
+      scoreA: null,
+      scoreB: null,
     })),
     resting: best.resting.map((p) => p.id),
   };

@@ -1,7 +1,17 @@
 import { useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, Text, View } from 'react-native';
-import { MatchMode, Player, Round, TIER_LABEL, TIERS, Team, Tier } from '../../src/domain/types';
+import {
+  Match,
+  MatchMode,
+  Player,
+  Round,
+  TIER_LABEL,
+  TIERS,
+  Team,
+  Tier,
+  winnerFromScores,
+} from '../../src/domain/types';
 import {
   Session,
   StoredMatch,
@@ -9,6 +19,7 @@ import {
   buildHistory,
   createPlayer,
   createSession,
+  deleteRound,
   endSession,
   getActiveSession,
   getSessionRoster,
@@ -17,7 +28,10 @@ import {
   setSessionRoster,
   setSetting,
   loadRounds,
+  removePlayerFromSession,
   saveRound,
+  sessionStandings,
+  setMatchScore,
   setMatchWinner,
   substitutePlayer,
   updateRoundLineups,
@@ -35,7 +49,16 @@ import {
 } from '../../src/pairing/engine';
 import { Icon } from '../../src/ui/Icon';
 import { MatchCard, Slot } from '../../src/ui/MatchCard';
-import { EmptyCourtCard, QueueEntry, UpNext, WaitingQueue, buildQueue } from '../../src/ui/UpNext';
+import {
+  EmptyCourtCard,
+  NextMatchups,
+  QueueEntry,
+  UpNext,
+  WaitingQueue,
+  buildQueue,
+} from '../../src/ui/UpNext';
+import { HeaderButton, SelectionBar, UndoBar } from '../../src/ui/SessionControls';
+import { STANDINGS_HINT, Standings } from '../../src/ui/Standings';
 import {
   Button,
   Card,
@@ -48,12 +71,16 @@ import {
   Muted,
   Row,
   Screen,
+  SearchField,
   Segmented,
+  Sheet,
   Stepper,
   TierBadge,
   Title,
   ToggleRow,
+  matchesSearch,
 } from '../../src/ui/components';
+import { rowLayout } from '../../src/ui/motion';
 import { themedStyles, useTheme } from '../../src/ui/ThemeContext';
 import { font, radius, space } from '../../src/ui/theme';
 import { useResponsive } from '../../src/ui/useResponsive';
@@ -94,6 +121,8 @@ function SessionSetup({ onStarted }: { onStarted: () => void }) {
   // Standing links default on - if someone bothered to set up a fixed
   // partner, they want it honored unless they say otherwise for this session.
   const [honorLinks, setHonorLinks] = useState(true);
+  const [showPicker, setShowPicker] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState('');
 
   useFocusEffect(
     useCallback(() => {
@@ -111,6 +140,8 @@ function SessionSetup({ onStarted }: { onStarted: () => void }) {
       else next.add(id);
       return next;
     });
+
+  const visiblePickerPlayers = allPlayers.filter((p) => matchesSearch(p.name, pickerQuery));
 
   const needed = minPlayersFor(mode);
   const canStart = picked.size >= needed;
@@ -165,6 +196,109 @@ function SessionSetup({ onStarted }: { onStarted: () => void }) {
       <Title>New session</Title>
       <Muted>Check in who's here, then let the app build the matchups.</Muted>
 
+      {/* Checking people in is the one thing you always do, so it leads -
+          and it opens in a dialog rather than an inline grid, which on a
+          20-plus roster used to bury every other setting below the fold. */}
+      <Card style={{ marginTop: space.lg }}>
+        <Row style={{ justifyContent: 'space-between' }}>
+          <View style={{ flex: 1, paddingRight: space.md }}>
+            <Heading style={{ marginTop: 0 }}>Who's here?</Heading>
+            <Muted>
+              {picked.size === 0
+                ? `Nobody checked in yet · ${allPlayers.length} on the roster`
+                : `${picked.size} of ${allPlayers.length} checked in`}
+            </Muted>
+          </View>
+          <Button
+            label={picked.size === 0 ? 'Check in' : 'Edit'}
+            variant="secondary"
+            onPress={() => setShowPicker(true)}
+          />
+        </Row>
+
+        {picked.size > 0 ? (
+          <>
+            <View style={{ height: space.sm }} />
+            <Text style={styles.pickedNames} numberOfLines={2}>
+              {allPlayers
+                .filter((p) => picked.has(p.id))
+                .map((p) => p.name)
+                .join(' · ')}
+            </Text>
+          </>
+        ) : null}
+      </Card>
+
+      <Sheet
+        visible={showPicker}
+        title="Who's here?"
+        subtitle="Tap everyone playing tonight. You can add more once the session starts."
+        onClose={() => setShowPicker(false)}
+        headerAction={
+          <>
+            <SearchField value={pickerQuery} onChangeText={setPickerQuery} />
+            <View style={{ height: space.sm }} />
+            <Row style={{ justifyContent: 'space-between' }}>
+              <Muted>{picked.size} selected</Muted>
+              {/* Select-all follows the filter: with a search active, the
+                  obvious meaning is "everyone I can currently see". */}
+              <LinkButton
+                label={visiblePickerPlayers.every((p) => picked.has(p.id)) ? 'Clear these' : 'Select these'}
+                onPress={() =>
+                  setPicked((prev) => {
+                    const next = new Set(prev);
+                    const allOn = visiblePickerPlayers.every((p) => next.has(p.id));
+                    for (const p of visiblePickerPlayers) {
+                      if (allOn) next.delete(p.id);
+                      else next.add(p.id);
+                    }
+                    return next;
+                  })
+                }
+              />
+            </Row>
+          </>
+        }
+        footer={
+          <Button
+            label={canStart ? `Done · ${picked.size} players` : `Pick at least ${needed} players`}
+            onPress={() => setShowPicker(false)}
+            disabled={!canStart}
+          />
+        }
+      >
+        <Grid>
+          {visiblePickerPlayers.map((p) => {
+            const on = picked.has(p.id);
+            return (
+              <GridCell key={p.id} columns={r.playerColumns} layout={rowLayout}>
+                <Pressable
+                  onPress={() => toggle(p.id)}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: on }}
+                  accessibilityLabel={`${p.name}, ${TIER_LABEL[p.tier]}`}
+                >
+                  <View style={[styles.pick, on && styles.pickOn]}>
+                    <View style={[styles.check, on && styles.checkOn]}>
+                      {on ? <Icon name="check" size={14} color={c.accentText} /> : null}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.pickName} numberOfLines={1}>
+                        {p.name}
+                      </Text>
+                    </View>
+                    <TierBadge tier={p.tier} small />
+                  </View>
+                </Pressable>
+              </GridCell>
+            );
+          })}
+        </Grid>
+        {visiblePickerPlayers.length === 0 ? (
+          <Muted>Nobody matches "{pickerQuery.trim()}".</Muted>
+        ) : null}
+      </Sheet>
+
       <Card style={{ marginTop: space.lg }}>
         <Input placeholder={defaultSessionName()} value={name} onChangeText={setName} />
 
@@ -215,50 +349,42 @@ function SessionSetup({ onStarted }: { onStarted: () => void }) {
         ) : null}
       </Card>
 
-      <Row style={{ justifyContent: 'space-between', marginTop: space.xl }}>
-        <Heading>Who's here?</Heading>
-        <LinkButton
-          label={picked.size === allPlayers.length ? 'Clear all' : 'Select all'}
-          onPress={() =>
-            setPicked(picked.size === allPlayers.length ? new Set() : new Set(allPlayers.map((p) => p.id)))
-          }
-        />
-      </Row>
-
-      <Grid>
-        {allPlayers.map((p) => {
-          const on = picked.has(p.id);
-          return (
-            <GridCell key={p.id} columns={r.playerColumns}>
-              <Pressable
-                onPress={() => toggle(p.id)}
-                accessibilityRole="checkbox"
-                accessibilityState={{ checked: on }}
-                accessibilityLabel={`${p.name}, ${TIER_LABEL[p.tier]}`}
-              >
-                <View style={[styles.pick, on && styles.pickOn]}>
-                  <View style={[styles.check, on && styles.checkOn]}>
-                    {on ? <Icon name="check" size={14} color={c.accentText} /> : null}
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.pickName} numberOfLines={1}>
-                      {p.name}
-                    </Text>
-                  </View>
-                  <TierBadge tier={p.tier} small />
-                </View>
-              </Pressable>
-            </GridCell>
-          );
-        })}
-      </Grid>
     </Screen>
   );
 }
 
 // --- active session ---------------------------------------------------------
 
-type SessionTab = 'live' | 'history';
+type SessionTab = 'live' | 'history' | 'standings';
+
+/**
+ * What the organiser has tapped. A court or bench slot belongs to a specific
+ * round; someone in the continuous-play waiting list has no slot at all, so
+ * they're tracked by player instead.
+ */
+type Selection =
+  | { kind: 'slot'; roundId: number; ref: SlotRef }
+  | { kind: 'waiting'; playerId: number };
+
+/** A result that was just decided and can still be taken back. */
+type PendingUndo = {
+  matchId: number;
+  /** The scores as they stood before the deciding entry - what Undo restores. */
+  prevA: number | null;
+  prevB: number | null;
+  /** Rounds with a higher id were filled in after the decision; Undo removes them. */
+  afterRoundId: number;
+  message: string;
+};
+
+/** Long enough to read the bar and reach for it, short enough not to linger into the next game. */
+const UNDO_WINDOW_MS = 8000;
+
+function playerAtSlot(round: StoredRound, ref: SlotRef): number | undefined {
+  if (ref.kind === 'bench') return round.resting[ref.index];
+  const match = round.matches.find((m) => m.court === ref.court);
+  return match ? (ref.team === 'A' ? match.teamA : match.teamB)[ref.index] : undefined;
+}
 
 function ActiveSession({ session, onChanged }: { session: Session; onChanged: () => void }) {
   const r = useResponsive();
@@ -266,10 +392,21 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
   const { c } = useTheme();
   const [rounds, setRounds] = useState<StoredRound[]>([]);
   const [roster, setRoster] = useState<Player[]>([]);
-  const [selected, setSelected] = useState<{ roundId: number; ref: SlotRef } | null>(null);
+  // False until the first read from the database. Before it, the empty
+  // roster makes every queued player look gone and every court look open,
+  // and acting on that would throw away a saved queue on every launch.
+  const [loaded, setLoaded] = useState(false);
+  const [selected, setSelected] = useState<Selection | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showAddPlayers, setShowAddPlayers] = useState(false);
   const [tab, setTab] = useState<SessionTab>('live');
+  const [undo, setUndo] = useState<PendingUndo | null>(null);
+
+  useEffect(() => {
+    if (!undo) return;
+    const t = setTimeout(() => setUndo(null), UNDO_WINDOW_MS);
+    return () => clearTimeout(t);
+  }, [undo]);
 
   // The proposed next round. Held here rather than in the database so
   // reshuffling is free and an unplayed round never feeds back into the
@@ -301,26 +438,42 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
   // from. Loaded separately from the roster since most of them aren't in it.
   const [allPlayers, setAllPlayers] = useState<Player[]>([]);
   const [addPicked, setAddPicked] = useState<Set<number>>(new Set());
+  const [addQuery, setAddQuery] = useState('');
 
   const refresh = useCallback(() => {
-    const loaded = loadRounds(session.id);
+    const loadedRounds = loadRounds(session.id);
     const currentRoster = getSessionRoster(session.id);
-    setRounds(loaded);
+    setRounds(loadedRounds);
     setRoster(currentRoster);
+    setLoaded(true);
     setAllPlayers(listPlayers());
     // The whole-roster preview only feeds the manual "Start next round" flow -
     // continuous play fills courts one at a time instead (see the effect
     // below), so computing it there would just be wasted sampling.
-    if (!session.autoQueue) planNext(currentRoster, loaded);
+    if (!session.autoQueue) planNext(currentRoster, loadedRounds);
   }, [session.id, session.autoQueue, planNext]);
 
   useFocusEffect(useCallback(() => refresh(), [refresh]));
 
   const playersById = useMemo(() => new Map(roster.map((p) => [p.id, p])), [roster]);
 
+  // Re-read rather than tally locally: `rounds` already changes on every
+  // winner tap (and every substitution), and re-querying keeps this in step
+  // with the same SQL the finished-session view uses, so live and history
+  // standings can't drift apart.
+  const standings = useMemo(() => sessionStandings(session.id), [session.id, rounds]);
+
   const rosterIds = useMemo(() => new Set(roster.map((p) => p.id)), [roster]);
   const addCandidates = useMemo(
-    () => allPlayers.filter((p) => !p.archived && !rosterIds.has(p.id)),
+    () =>
+      allPlayers.filter(
+        (p) => !p.archived && !rosterIds.has(p.id) && matchesSearch(p.name, addQuery)
+      ),
+    [allPlayers, rosterIds, addQuery]
+  );
+  /** Kept separate from `addCandidates` so a search miss doesn't read as "everyone is in". */
+  const hasAddCandidates = useMemo(
+    () => allPlayers.some((p) => !p.archived && !rosterIds.has(p.id)),
     [allPlayers, rosterIds]
   );
 
@@ -390,37 +543,93 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
     return arr;
   }, [latestMatchByCourt, session.courts]);
 
-  // Fills every currently-empty court it can from whoever's idle right now.
-  // Runs at session start (every court is "empty") and again after every
-  // winner tap, since deciding a match frees its players and can immediately
-  // unblock a different court that was waiting on a body count.
+  // Continuous play keeps a short queue of matchups formed ahead of time -
+  // one per court, the next "wave" - so people waiting can see when they're
+  // on. At open play, with ten or so players per court, "when am I up?" is
+  // the question the organiser fields all night.
+  //
+  // The queue is a promise, not a guess: a court that opens takes the front
+  // matchup exactly as shown. So it's kept in the settings table, not just in
+  // memory - Android kills a backgrounded app freely, and a queue that quietly
+  // re-formed on relaunch would bump people who'd been told they were next.
+  // It still never feeds the pairing history until a game is actually played.
+  const upcomingKey = `upcoming_queue_${session.id}`;
+  const [upcoming, setUpcoming] = useState<Match[]>(() => {
+    try {
+      const saved = getSetting(upcomingKey);
+      return saved ? (JSON.parse(saved) as Match[]) : [];
+    } catch {
+      return []; // A corrupt entry just means the queue forms afresh.
+    }
+  });
   useEffect(() => {
-    if (!session.autoQueue || emptyCourts.length === 0) return;
-    const history = buildHistory(session.id);
-    const result = generateRound({
-      players: idlePlayers,
-      courts: emptyCourts.length,
-      mode: session.mode,
-      strategy: session.strategy,
-      history,
-      roundNumber: rounds.length + 1,
-      honorLinks: session.honorLinks,
-    });
-    if (!result.ok) return; // Not enough idle players yet - stays queued.
-    const filled: Round = {
-      ...result.round,
-      matches: result.round.matches.map((m, i) => ({ ...m, court: emptyCourts[i] })),
+    setSetting(upcomingKey, JSON.stringify(upcoming));
+  }, [upcomingKey, upcoming]);
+
+  // One effect owns both jobs - refilling open courts and topping the queue
+  // back up - because they draw from the same pool of free players, and two
+  // effects racing over it could seat someone twice.
+  //
+  // Runs at session start (every court is "empty"), after every result
+  // (deciding a match frees its players), and whenever the free pool changes
+  // through a sub, a removal or a late arrival.
+  useEffect(() => {
+    if (!session.autoQueue || !loaded) return;
+
+    const idleIds = new Set(idlePlayers.map((p) => p.id));
+    const seated = (m: Match) => [...m.teamA, ...m.teamB];
+    // A queued matchup survives only while everyone in it is still free and
+    // still checked in.
+    const queue = upcoming.filter((m) => seated(m).every((id) => idleIds.has(id)));
+    const freeOutside = (taken: Match[]) => {
+      const busy = new Set(taken.flatMap(seated));
+      return idlePlayers.filter((p) => !busy.has(p.id));
     };
-    saveRound(session.id, filled);
-    refresh();
+    const form = (pool: Player[], courts: number): Match[] => {
+      if (courts <= 0) return [];
+      const result = generateRound({
+        players: pool,
+        courts,
+        mode: session.mode,
+        strategy: session.strategy,
+        history: buildHistory(session.id),
+        roundNumber: rounds.length + 1,
+        honorLinks: session.honorLinks,
+      });
+      return result.ok ? result.round.matches : [];
+    };
+
+    if (emptyCourts.length > 0) {
+      const toPlay = queue.splice(0, emptyCourts.length);
+      // Courts the queue couldn't cover - too few people were waiting ahead
+      // of time, as in a small group - form their game now from everyone
+      // free, including whoever just came off.
+      toPlay.push(...form(freeOutside([...toPlay, ...queue]), emptyCourts.length - toPlay.length));
+      if (toPlay.length > 0) {
+        saveRound(session.id, {
+          number: rounds.length + 1,
+          matches: toPlay.map((m, i) => ({ ...m, court: emptyCourts[i] })),
+          resting: freeOutside(toPlay).map((p) => p.id),
+        });
+        setUpcoming(queue);
+        refresh();
+        return;
+      }
+    }
+
+    const topUp = form(freeOutside(queue), session.courts - queue.length);
+    if (topUp.length > 0 || queue.length !== upcoming.length) setUpcoming([...queue, ...topUp]);
   }, [
+    loaded,
     session.autoQueue,
     session.id,
     session.mode,
     session.strategy,
     session.honorLinks,
+    session.courts,
     emptyCourts,
     idlePlayers,
+    upcoming,
     rounds.length,
     refresh,
   ]);
@@ -433,6 +642,9 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
     }
     saveRound(session.id, next);
     setSelected(null);
+    // Undo would now also delete the round that just started - not what
+    // anyone reaching for it a moment later means.
+    setUndo(null);
     refresh();
   };
 
@@ -440,11 +652,18 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
     const round = rounds.find((x) => x.id === roundId);
     if (!round) return;
 
+    // Someone waiting was picked first, so this tap names who they replace.
+    if (selected?.kind === 'waiting') {
+      if (ref.kind === 'court') subIn(round, ref, selected.playerId);
+      else setSelected({ kind: 'slot', roundId, ref });
+      return;
+    }
+
     // First tap selects; second tap swaps. Selecting across two different
     // rounds would move a player out of a round they already played, so a tap
     // in another round just moves the selection instead.
     if (!selected || selected.roundId !== roundId) {
-      setSelected({ roundId, ref });
+      setSelected({ kind: 'slot', roundId, ref });
       return;
     }
     if (
@@ -462,38 +681,143 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
   };
 
   // Continuous play has no shared "bench" to swap against - courts advance on
-  // their own, so whoever isn't currently seated is just idle. This lets a
-  // selected on-court player be replaced by someone from that waiting list
-  // directly, which covers both a tactical sub and a player leaving mid-game.
-  const substituteFromWaiting = (inId: number) => {
-    if (!selected) return;
-    const ref = selected.ref;
-    if (ref.kind !== 'court') return;
-    const round = rounds.find((x) => x.id === selected.roundId);
-    const match = round?.matches.find((m) => m.court === ref.court);
-    if (!round || !match) return;
-    const outId = (ref.team === 'A' ? match.teamA : match.teamB)[ref.index];
-    if (outId === undefined || outId === inId) {
+  // their own, so whoever isn't currently seated is just idle. This lets an
+  // on-court player be replaced by someone from that waiting list directly,
+  // which covers both a tactical sub and a player leaving mid-game.
+  const subIn = (round: StoredRound, ref: Extract<SlotRef, { kind: 'court' }>, inId: number) => {
+    const match = round.matches.find((m) => m.court === ref.court);
+    const outId = playerAtSlot(round, ref);
+    setSelected(null);
+    if (!match || outId === undefined || outId === inId) return;
+    substitutePlayer(match.id, outId, inId);
+    refresh();
+  };
+
+  /** Either order works: court player then waiting player, or the reverse. */
+  const onWaitingPress = (playerId: number) => {
+    if (selected?.kind === 'slot') {
+      const round = rounds.find((x) => x.id === selected.roundId);
+      if (round && selected.ref.kind === 'court') subIn(round, selected.ref, playerId);
+      else setSelected({ kind: 'waiting', playerId });
+      return;
+    }
+    if (selected?.kind === 'waiting' && selected.playerId === playerId) {
       setSelected(null);
       return;
     }
-    substitutePlayer(match.id, outId, inId);
-    setSelected(null);
-    refresh();
+    setSelected({ kind: 'waiting', playerId });
+  };
+
+  const removeFromSession = (playerId: number) => {
+    const player = playersById.get(playerId);
+    if (!player) return;
+    const onCourt = busyIds.has(playerId);
+    Alert.alert(
+      `Remove ${player.name}?`,
+      onCourt
+        ? 'They finish the game they are on, then drop out of the rotation. Results they already have are kept.'
+        : 'They drop out of the rotation for the rest of this session. Results they already have are kept.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            removePlayerFromSession(session.id, playerId);
+            setSelected(null);
+            refresh();
+          },
+        },
+      ]
+    );
+  };
+
+  const changeScore = (
+    round: StoredRound,
+    matchIndex: number,
+    scoreA: number | null,
+    scoreB: number | null
+  ) => {
+    const match = round.matches[matchIndex];
+    setMatchScore(match.id, scoreA, scoreB);
+
+    // Mirror the derivation the repo just persisted, so continuous play sees
+    // the new winner immediately instead of waiting for a refetch.
+    const winner = winnerFromScores(scoreA, scoreB);
+
+    // Only the entry that turns an open match into a result gets an undo -
+    // that's the moment continuous play refills the court. Correcting a score
+    // that leaves the same winner changes nothing downstream.
+    if (match.winner == null && winner != null) {
+      const names = (winner === 'A' ? match.teamA : match.teamB)
+        .map((id) => playersById.get(id)?.name ?? '—')
+        .join(' & ');
+      const [won, lost] = winner === 'A' ? [scoreA, scoreB] : [scoreB, scoreA];
+      setUndo({
+        matchId: match.id,
+        prevA: match.scoreA,
+        prevB: match.scoreB,
+        afterRoundId: rounds.reduce((max, r2) => Math.max(max, r2.id), 0),
+        message: `Court ${match.court + 1} · ${names} won ${won}–${lost}`,
+      });
+      // The court is about to turn over, so a selection made before the
+      // result would point at a game that just ended.
+      setSelected(null);
+    } else if (winner == null && undo?.matchId === match.id) {
+      setUndo(null);
+    }
+
+    const updated = round.matches.map((m, i) =>
+      i === matchIndex ? { ...m, scoreA, scoreB, winner } : m
+    );
+    setRounds((prev) =>
+      prev.map((r2) => (r2.id !== round.id ? r2 : { ...r2, matches: updated }))
+    );
   };
 
   const changeWinner = (round: StoredRound, matchIndex: number, winner: Team | null) => {
     const match = round.matches[matchIndex];
     setMatchWinner(match.id, winner);
+    if (undo?.matchId === match.id) setUndo(null);
 
     // In continuous play, this is the only trigger the fill effect above needs:
     // updating `rounds` here recomputes `busyIds`/`emptyCourts`, which frees
     // this court's players and lets that effect refill whichever court just
     // opened up, independently of every other court's progress.
-    const updated = round.matches.map((m, i) => (i === matchIndex ? { ...m, winner } : m));
+    // setMatchWinner drops any stored score, so the local copy has to as well
+    // or the card would keep rendering points the database no longer has.
+    const updated = round.matches.map((m, i) =>
+      i === matchIndex ? { ...m, winner, scoreA: null, scoreB: null } : m
+    );
     setRounds((prev) =>
       prev.map((r2) => (r2.id !== round.id ? r2 : { ...r2, matches: updated }))
     );
+  };
+
+  /**
+   * Takes back the last decided result. In continuous play that also means
+   * removing whatever was auto-filled since, so the court's players go back
+   * on it - deleteRound cascades to the matches and line-ups inside it.
+   */
+  const undoDecision = () => {
+    if (!undo) return;
+    const added = rounds.filter((r2) => r2.id > undo.afterRoundId);
+    const touched = added.some((r2) =>
+      r2.matches.some((m) => m.winner != null || m.scoreA != null || m.scoreB != null)
+    );
+    setUndo(null);
+    if (touched) {
+      Alert.alert(
+        "Can't undo that one",
+        'A game that started after it already has a score. Fix the result from the History tab instead.'
+      );
+      return;
+    }
+    for (const r2 of added) deleteRound(r2.id);
+    setMatchScore(undo.matchId, undo.prevA, undo.prevB);
+    setUpcoming((prev) => [...added.flatMap((r2) => r2.matches), ...prev]);
+    setSelected(null);
+    refresh();
   };
 
   const finish = () => {
@@ -504,6 +828,7 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
         style: 'destructive',
         onPress: () => {
           endSession(session.id);
+          setSetting(upcomingKey, ''); // nothing left to queue for
           onChanged();
         },
       },
@@ -540,19 +865,73 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
     ? pastEntries.reduce((n, g) => n + g.items.length, 0)
     : pastRounds.length;
 
-  return (
-    <Screen
-      footer={
-        session.autoQueue ? (
-          <Button label="End" variant="ghost" onPress={finish} />
-        ) : (
-          <Row gap={space.sm}>
-            <Button label="Start next round" onPress={startRound} disabled={!next} style={{ flex: 2 }} />
-            <Button label="End" variant="ghost" onPress={finish} style={{ flex: 1 }} />
-          </Row>
-        )
+  const stillWaiting = useMemo(() => {
+    const queued = new Set(upcoming.flatMap((m) => [...m.teamA, ...m.teamB]));
+    return waitingQueue.filter((q) => !queued.has(q.player.id));
+  }, [waitingQueue, upcoming]);
+
+  const selectedPlayerId = useMemo(() => {
+    if (!selected) return undefined;
+    if (selected.kind === 'waiting') return selected.playerId;
+    const round = rounds.find((x) => x.id === selected.roundId);
+    return round ? playerAtSlot(round, selected.ref) : undefined;
+  }, [selected, rounds]);
+  const selectedPlayer =
+    selectedPlayerId !== undefined ? playersById.get(selectedPlayerId) : undefined;
+
+  /** The selection to hand a MatchCard or bench slot belonging to `roundId`. */
+  const slotSelection = (roundId: number) =>
+    selected?.kind === 'slot' && selected.roundId === roundId ? selected.ref : null;
+
+  const selectionHint =
+    selected?.kind === 'waiting'
+      ? `Tap a player on court to sub ${selectedPlayer?.name ?? 'them'} in.`
+      : session.autoQueue
+        ? waitingQueue.length > 0
+          ? 'Tap a court player to swap, or sub in:'
+          : 'Tap another player on court to swap places.'
+        : 'Tap another player to swap places, or tap them again to cancel.';
+
+  // Only a court player can be subbed out; a waiting player picks their
+  // target on court instead.
+  const canSub =
+    session.autoQueue && selected?.kind === 'slot' && selected.ref.kind === 'court';
+
+  const closeAddPlayers = () => {
+    setShowAddPlayers(false);
+    setAddPicked(new Set());
+    setAddQuery('');
+  };
+
+  // The thumb zone holds whatever is in progress: a selection outranks
+  // everything (it's the thing being done right now), then the undo for a
+  // result just entered, then starting the next round. Continuous play has no
+  // standing action, so with nothing going on the bar disappears entirely.
+  const mainAction = session.autoQueue ? null : (
+    <Button label="Start next round" onPress={startRound} disabled={!next} />
+  );
+  const footer = selectedPlayer ? (
+    <SelectionBar
+      name={selectedPlayer.name}
+      hint={selectionHint}
+      subOptions={
+        canSub
+          ? waitingQueue.map((q) => ({ id: q.player.id, name: q.player.name, games: q.games }))
+          : undefined
       }
-    >
+      onSub={onWaitingPress}
+      onRemove={() => removeFromSession(selectedPlayer.id)}
+      onCancel={() => setSelected(null)}
+    />
+  ) : undo || mainAction ? (
+    <View style={{ gap: space.md }}>
+      {undo ? <UndoBar message={undo.message} onUndo={undoDecision} /> : null}
+      {mainAction}
+    </View>
+  ) : null;
+
+  return (
+    <Screen footer={footer}>
       <Row style={{ justifyContent: 'space-between', marginTop: space.lg }}>
         <View style={{ flex: 1 }}>
           <Text style={styles.sessionName} numberOfLines={1}>
@@ -563,140 +942,157 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
             {roster.length} players
           </Muted>
         </View>
-        <Row gap={space.md}>
-          <LinkButton
-            label="Add players"
-            onPress={() => {
-              setShowSettings(false);
-              setShowAddPlayers((v) => !v);
-            }}
+        <Row gap={space.sm}>
+          <HeaderButton
+            icon="plus"
+            label="Add"
+            accessibilityLabel="Add players"
+            onPress={() => setShowAddPlayers(true)}
           />
-          <LinkButton
-            label={showSettings ? 'Done' : 'Settings'}
-            onPress={() => {
-              setShowAddPlayers(false);
-              setShowSettings((v) => !v);
-            }}
+          <HeaderButton
+            icon="more"
+            accessibilityLabel="Session settings"
+            onPress={() => setShowSettings(true)}
           />
         </Row>
       </Row>
 
-      {showAddPlayers ? (
-        <Card style={{ marginTop: space.md }}>
-          <Heading>Add players</Heading>
-          {addCandidates.length === 0 ? (
-            <Muted>Everyone else is already checked in.</Muted>
-          ) : (
-            <>
-              <Muted>Tap to check someone in - they join right away, mid-session.</Muted>
-              <View style={{ height: space.sm }} />
-              <Grid>
-                {addCandidates.map((p) => {
-                  const on = addPicked.has(p.id);
-                  return (
-                    <GridCell key={p.id} columns={r.playerColumns}>
-                      <Pressable
-                        onPress={() =>
-                          setAddPicked((prev) => {
-                            const n = new Set(prev);
-                            if (n.has(p.id)) n.delete(p.id);
-                            else n.add(p.id);
-                            return n;
-                          })
-                        }
-                        accessibilityRole="checkbox"
-                        accessibilityState={{ checked: on }}
-                        accessibilityLabel={`${p.name}, ${TIER_LABEL[p.tier]}`}
-                      >
-                        <View style={[styles.pick, on && styles.pickOn]}>
-                          <View style={[styles.check, on && styles.checkOn]}>
-                            {on ? <Icon name="check" size={14} color={c.accentText} /> : null}
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.pickName} numberOfLines={1}>
-                              {p.name}
-                            </Text>
-                          </View>
-                          <TierBadge tier={p.tier} small />
+      {/* Sheets rather than inline panels: an inline panel opened at the top
+          pushed the courts - the thing actually being played - off screen. */}
+      <Sheet
+        visible={showAddPlayers}
+        title="Add players"
+        subtitle="They join the rotation right away, mid-session."
+        onClose={closeAddPlayers}
+        footer={
+          hasAddCandidates ? (
+            <Button
+              label={addPicked.size > 0 ? `Add ${addPicked.size} to session` : 'Select players to add'}
+              disabled={addPicked.size === 0}
+              onPress={() => {
+                addPlayersToSession([...addPicked]);
+                closeAddPlayers();
+              }}
+            />
+          ) : undefined
+        }
+      >
+        {!hasAddCandidates ? (
+          <Muted>Everyone else is already checked in.</Muted>
+        ) : (
+          <>
+            <SearchField value={addQuery} onChangeText={setAddQuery} />
+            <View style={{ height: space.sm }} />
+            {addCandidates.length === 0 ? (
+              <Muted>Nobody available matches "{addQuery.trim()}".</Muted>
+            ) : null}
+            <Grid>
+              {addCandidates.map((p) => {
+                const on = addPicked.has(p.id);
+                return (
+                  <GridCell key={p.id} columns={r.playerColumns} layout={rowLayout}>
+                    <Pressable
+                      onPress={() =>
+                        setAddPicked((prev) => {
+                          const n = new Set(prev);
+                          if (n.has(p.id)) n.delete(p.id);
+                          else n.add(p.id);
+                          return n;
+                        })
+                      }
+                      accessibilityRole="checkbox"
+                      accessibilityState={{ checked: on }}
+                      accessibilityLabel={`${p.name}, ${TIER_LABEL[p.tier]}`}
+                    >
+                      <View style={[styles.pick, on && styles.pickOn]}>
+                        <View style={[styles.check, on && styles.checkOn]}>
+                          {on ? <Icon name="check" size={14} color={c.accentText} /> : null}
                         </View>
-                      </Pressable>
-                    </GridCell>
-                  );
-                })}
-              </Grid>
-              <View style={{ height: space.sm }} />
-              <Button
-                label={addPicked.size > 0 ? `Add ${addPicked.size} to session` : 'Select players to add'}
-                disabled={addPicked.size === 0}
-                onPress={() => addPlayersToSession([...addPicked])}
-              />
-              <View style={{ height: space.lg }} />
-            </>
-          )}
-          <Muted>Not on the roster at all yet?</Muted>
-          <View style={{ height: space.sm }} />
-          <QuickAddPlayer
-            existing={allPlayers}
-            onAdd={(name, tier) => {
-              const p = createPlayer(name, tier);
-              addPlayersToSession([p.id]);
-            }}
-          />
-        </Card>
-      ) : null}
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.pickName} numberOfLines={1}>
+                            {p.name}
+                          </Text>
+                        </View>
+                        <TierBadge tier={p.tier} small />
+                      </View>
+                    </Pressable>
+                  </GridCell>
+                );
+              })}
+            </Grid>
+          </>
+        )}
+        <View style={{ height: space.lg }} />
+        <Muted>Not on the roster at all yet?</Muted>
+        <View style={{ height: space.sm }} />
+        <QuickAddPlayer
+          existing={allPlayers}
+          onAdd={(name, tier) => {
+            const p = createPlayer(name, tier);
+            addPlayersToSession([p.id]);
+          }}
+        />
+      </Sheet>
 
-      {showSettings ? (
-        <Card style={{ marginTop: space.md }}>
-          <Muted>Pairing style for the next round</Muted>
-          <View style={{ height: space.sm }} />
-          <Segmented
-            value={session.strategy}
-            onChange={(s) => {
-              updateSessionSettings(session.id, { strategy: s });
-              onChanged();
-            }}
-            options={STRATEGIES.map((s) => ({ value: s, label: STRATEGY_LABEL[s] }))}
-          />
-          <View style={{ height: space.sm }} />
-          <Muted>{STRATEGY_HINT[session.strategy]}</Muted>
-          <View style={{ height: space.lg }} />
-          <Stepper
-            label="Courts available"
-            value={session.courts}
-            min={1}
-            max={8}
-            onChange={(courts) => {
-              updateSessionSettings(session.id, { courts });
-              onChanged();
-            }}
-          />
-          <View style={{ height: space.lg }} />
-          <ToggleRow
-            label="Keep rounds rolling"
-            hint="Each court refills the moment you pick its winner - no waiting on the other courts."
-            value={session.autoQueue}
-            onChange={(autoQueue) => {
-              updateSessionSettings(session.id, { autoQueue });
-              setSetting(AUTO_QUEUE_KEY, autoQueue ? '1' : '0');
-              onChanged();
-            }}
-          />
-          {session.mode === 'doubles' ? (
-            <>
-              <View style={{ height: space.lg }} />
-              <ToggleRow
-                label="Honor fixed partners"
-                hint="Players with a Link always play together. Turn off to shuffle everyone freely for the rest of this session."
-                value={session.honorLinks}
-                onChange={(honorLinks) => {
-                  updateSessionSettings(session.id, { honorLinks });
-                  onChanged();
-                }}
-              />
-            </>
-          ) : null}
-        </Card>
-      ) : null}
+      <Sheet
+        visible={showSettings}
+        title="Session"
+        subtitle={session.name}
+        onClose={() => setShowSettings(false)}
+        footer={<Button label="End session" variant="danger" onPress={finish} />}
+      >
+        <Muted>Pairing style for the next round</Muted>
+        <View style={{ height: space.sm }} />
+        <Segmented
+          value={session.strategy}
+          onChange={(s) => {
+            updateSessionSettings(session.id, { strategy: s });
+            onChanged();
+          }}
+          options={STRATEGIES.map((s) => ({ value: s, label: STRATEGY_LABEL[s] }))}
+        />
+        <View style={{ height: space.sm }} />
+        <Muted>{STRATEGY_HINT[session.strategy]}</Muted>
+        <View style={{ height: space.lg }} />
+        <Stepper
+          label="Courts available"
+          value={session.courts}
+          min={1}
+          max={8}
+          onChange={(courts) => {
+            updateSessionSettings(session.id, { courts });
+            onChanged();
+          }}
+        />
+        <View style={{ height: space.lg }} />
+        <ToggleRow
+          label="Keep rounds rolling"
+          hint="Each court refills the moment you pick its winner - no waiting on the other courts."
+          value={session.autoQueue}
+          onChange={(autoQueue) => {
+            updateSessionSettings(session.id, { autoQueue });
+            setSetting(AUTO_QUEUE_KEY, autoQueue ? '1' : '0');
+            setSelected(null);
+            setUndo(null);
+            setUpcoming([]);
+            onChanged();
+          }}
+        />
+        {session.mode === 'doubles' ? (
+          <>
+            <View style={{ height: space.lg }} />
+            <ToggleRow
+              label="Honor fixed partners"
+              hint="Players with a Link always play together. Turn off to shuffle everyone freely for the rest of this session."
+              value={session.honorLinks}
+              onChange={(honorLinks) => {
+                updateSessionSettings(session.id, { honorLinks });
+                onChanged();
+              }}
+            />
+          </>
+        ) : null}
+      </Sheet>
 
       <View style={{ marginTop: space.lg }}>
         <Segmented
@@ -711,38 +1107,26 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
               value: 'history',
               label: pastCount > 0 ? `History · ${pastCount}` : 'History',
             },
+            { value: 'standings', label: 'Standings' },
           ]}
         />
       </View>
 
-      {tab === 'live' ? (
-        <>
-          {session.autoQueue ? (
-            <WaitingQueue queue={waitingQueue} onPress={selected ? substituteFromWaiting : undefined} />
-          ) : (
-            <UpNext
-              next={next}
-              queue={queue}
-              players={playersById}
-              roundNumber={rounds.length + 1}
-              courtColumns={r.courtColumns}
-              autoQueue={session.autoQueue}
-              onShuffle={() => planNext(roster, rounds)}
-            />
-          )}
-
-          {selected ? (
-            <View style={styles.swapHint}>
-              <Icon name="swap" size={18} color={c.accentInk} />
-              <Text style={styles.swapHintText}>
-                {session.autoQueue
-                  ? 'Tap another player on court to swap them, or tap someone waiting to sub them in.'
-                  : 'Tap another player to swap them. Tap the same one again to cancel.'}
-              </Text>
-            </View>
-          ) : null}
-
-          {session.autoQueue ? (
+      {tab === 'standings' ? (
+        <View style={{ marginTop: space.xl }}>
+          <Heading>Standings</Heading>
+          <Muted>{STANDINGS_HINT}</Muted>
+          <Standings
+            standings={standings}
+            emptyBody="Pick a winner on a court and the standings fill in."
+          />
+        </View>
+      ) : tab === 'live' ? (
+        // Courts first: the games in progress are what someone glancing at
+        // the phone between points is looking for. Who's waiting, and the
+        // preview of the next round, are supporting detail below them.
+        session.autoQueue ? (
+          <>
             <View style={{ marginTop: space.xl }}>
               <Heading>On court</Heading>
               <Grid gap={space.md}>
@@ -755,9 +1139,10 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
                         <MatchCard
                           match={match}
                           players={playersById}
-                          selected={selected?.roundId === loc.round.id ? selected.ref : null}
+                          selected={slotSelection(loc.round.id)}
                           onSlotPress={(ref) => onSlotPress(loc.round.id, ref)}
                           onWinnerChange={(w) => changeWinner(loc.round, loc.index, w)}
+                          onScoreChange={(a, b) => changeScore(loc.round, loc.index, a, b)}
                         />
                       ) : (
                         <EmptyCourtCard court={court} />
@@ -767,52 +1152,80 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
                 })}
               </Grid>
             </View>
-          ) : !currentRound ? (
-            <EmptyState
-              title="No rounds played yet"
-              body="Start the round above and it'll show up here, ready for you to tap in a winner."
+
+            <NextMatchups
+              matches={upcoming}
+              players={playersById}
+              columns={r.courtColumns}
+              selectedId={selected?.kind === 'waiting' ? selected.playerId : null}
+              subbing={selected?.kind === 'slot'}
+              onPress={onWaitingPress}
+              onShuffle={() => setUpcoming([])}
             />
-          ) : (
-            <View style={{ marginTop: space.xl }}>
-              <Row style={{ justifyContent: 'space-between' }}>
-                <Heading>Round {currentRound.number}</Heading>
-                <Text style={styles.current}>Current</Text>
-              </Row>
 
-              <Grid gap={space.md}>
-                {currentRound.matches.map((m, i) => (
-                  <GridCell key={m.id} columns={r.courtColumns} gap={space.md}>
-                    <MatchCard
-                      match={m}
-                      players={playersById}
-                      selected={selected?.roundId === currentRound.id ? selected.ref : null}
-                      onSlotPress={(ref) => onSlotPress(currentRound.id, ref)}
-                      onWinnerChange={(w) => changeWinner(currentRound, i, w)}
-                    />
-                  </GridCell>
-                ))}
-              </Grid>
+            <WaitingQueue
+              queue={stillWaiting}
+              title={upcoming.length > 0 ? 'Still waiting' : 'Waiting for a court'}
+              selectedId={selected?.kind === 'waiting' ? selected.playerId : null}
+              subbing={selected?.kind === 'slot'}
+              onPress={onWaitingPress}
+            />
+          </>
+        ) : (
+          <>
+            {currentRound ? (
+              <View style={{ marginTop: space.xl }}>
+                <Row style={{ justifyContent: 'space-between' }}>
+                  <Heading>Round {currentRound.number}</Heading>
+                  <Text style={styles.current}>Current</Text>
+                </Row>
 
-              {currentRound.resting.length > 0 ? (
-                <View style={{ marginTop: space.md }}>
-                  <Muted>Resting this round · tap to swap someone in</Muted>
-                  <View style={[styles.benchRow, { gap: space.sm }]}>
-                    {currentRound.resting.map((id, i) => (
-                      <View key={`${id}-${i}`} style={{ minWidth: 130, flexGrow: 1, maxWidth: 220 }}>
-                        <Slot
-                          player={playersById.get(id)}
-                          refSlot={{ kind: 'bench', index: i }}
-                          selected={selected?.roundId === currentRound.id ? selected.ref : null}
-                          onPress={(ref) => onSlotPress(currentRound.id, ref)}
-                        />
-                      </View>
-                    ))}
+                <Grid gap={space.md}>
+                  {currentRound.matches.map((m, i) => (
+                    <GridCell key={m.id} columns={r.courtColumns} gap={space.md}>
+                      <MatchCard
+                        match={m}
+                        players={playersById}
+                        selected={slotSelection(currentRound.id)}
+                        onSlotPress={(ref) => onSlotPress(currentRound.id, ref)}
+                        onWinnerChange={(w) => changeWinner(currentRound, i, w)}
+                        onScoreChange={(a, b) => changeScore(currentRound, i, a, b)}
+                      />
+                    </GridCell>
+                  ))}
+                </Grid>
+
+                {currentRound.resting.length > 0 ? (
+                  <View style={{ marginTop: space.md }}>
+                    <Muted>Resting this round · tap to swap someone in</Muted>
+                    <View style={[styles.benchRow, { gap: space.sm }]}>
+                      {currentRound.resting.map((id, i) => (
+                        <View key={`${id}-${i}`} style={{ minWidth: 130, flexGrow: 1, maxWidth: 220 }}>
+                          <Slot
+                            player={playersById.get(id)}
+                            refSlot={{ kind: 'bench', index: i }}
+                            selected={slotSelection(currentRound.id)}
+                            onPress={(ref) => onSlotPress(currentRound.id, ref)}
+                          />
+                        </View>
+                      ))}
+                    </View>
                   </View>
-                </View>
-              ) : null}
-            </View>
-          )}
-        </>
+                ) : null}
+              </View>
+            ) : null}
+
+            <UpNext
+              next={next}
+              queue={queue}
+              players={playersById}
+              roundNumber={rounds.length + 1}
+              courtColumns={r.courtColumns}
+              autoQueue={session.autoQueue}
+              onShuffle={() => planNext(roster, rounds)}
+            />
+          </>
+        )
       ) : session.autoQueue ? (
         pastEntries.length === 0 ? (
           <EmptyState
@@ -832,6 +1245,7 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
                       selected={null}
                       onSlotPress={() => {}}
                       onWinnerChange={(w) => changeWinner(round, index, w)}
+                      onScoreChange={(a, b) => changeScore(round, index, a, b)}
                       allowSwap={false}
                     />
                   </GridCell>
@@ -859,6 +1273,7 @@ function ActiveSession({ session, onChanged }: { session: Session; onChanged: ()
                     selected={null}
                     onSlotPress={() => {}}
                     onWinnerChange={(w) => changeWinner(round, i, w)}
+                    onScoreChange={(a, b) => changeScore(round, i, a, b)}
                     allowSwap={false}
                   />
                 </GridCell>
@@ -956,6 +1371,12 @@ const useStyles = themedStyles(({ c, font, family }) => ({
   },
   pickOn: { borderColor: c.accentEdge, backgroundColor: c.accentWash },
   pickName: { color: c.text, fontSize: font.md, fontFamily: family.semibold },
+  pickedNames: {
+    color: c.accentInk,
+    fontSize: font.sm,
+    fontFamily: family.semibold,
+    lineHeight: font.sm * 1.4,
+  },
   check: {
     width: 22,
     height: 22,
@@ -966,16 +1387,4 @@ const useStyles = themedStyles(({ c, font, family }) => ({
     justifyContent: 'center',
   },
   checkOn: { backgroundColor: c.accent, borderColor: c.accent },
-  swapHint: {
-    marginTop: space.md,
-    backgroundColor: c.accentWash,
-    borderRadius: radius.md,
-    padding: space.md,
-    borderWidth: 1,
-    borderColor: c.accentEdge,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
-  },
-  swapHintText: { color: c.text, fontSize: font.sm, fontFamily: family.regular, flex: 1 },
 }));

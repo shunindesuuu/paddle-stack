@@ -43,3 +43,6 @@ yarn-error.*
 
 # personal notes, not part of the app
 export-apk.txt
+
+# Built APKs staged for GitHub Releases (too large for git)
+release/

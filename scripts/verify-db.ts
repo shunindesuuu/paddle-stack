@@ -30,7 +30,10 @@ import {
   listSessions,
   loadRounds,
   playerStats,
+  removePlayerFromSession,
   saveRound,
+  sessionStandings,
+  setMatchScore,
   setMatchWinner,
   setSessionRoster,
   unlinkPlayer,
@@ -455,8 +458,20 @@ check(
   check('a draw becomes no result', winners[3].winner === null);
 
   const cols = legacy.getAllSync<{ name: string }>("PRAGMA table_info('matches');");
-  check('score columns are gone', !cols.some((x) => x.name === 'score_a' || x.name === 'score_b'));
   check('winner column exists', cols.some((x) => x.name === 'winner'));
+
+  // Migration 2->3 drops the original score columns; 6->7 introduces new ones
+  // for the points feature. Both run here, so the columns exist again - but
+  // the legacy values must NOT come back with them, or a 2019 score would
+  // reappear as if someone had just typed it in.
+  check('score columns exist again after 6->7', cols.some((x) => x.name === 'score_a'));
+  const legacyScores = legacy.getAllSync<{ score_a: number | null; score_b: number | null }>(
+    'SELECT score_a, score_b FROM matches;'
+  );
+  check(
+    'legacy scores did not survive the rebuild',
+    legacyScores.every((m) => m.score_a === null && m.score_b === null)
+  );
 
   // The child rows must still resolve after the table swap.
   const kids = legacy.getAllSync<{ n: number }>(
@@ -512,6 +527,210 @@ check(
   check('once cleared, the manual tier takes back over', ivyCleared.tier === 'advanced');
 
   setDuprSettings({ useDupr: false, beginnerMax: 3.0, intermediateMax: 4.0 });
+}
+
+// --- session standings ------------------------------------------------------
+
+{
+  // Two sessions with hand-picked winners, so every number below is exact.
+  // Both are created within the same second, which is precisely the case the
+  // "prior form" query's id tiebreak has to resolve.
+  const p1 = createPlayer('Standing One', 'intermediate');
+  const p2 = createPlayer('Standing Two', 'intermediate');
+  const p3 = createPlayer('Standing Three', 'intermediate');
+  const p4 = createPlayer('Standing Four', 'intermediate');
+  const ids = [p1.id, p2.id, p3.id, p4.id];
+
+  const playTwo = (sid: number, winner: 'A' | 'B') => {
+    for (const number of [1, 2]) {
+      const stored = saveRound(sid, {
+        number,
+        matches: [
+          { court: 0, mode: 'doubles', teamA: [p1.id, p2.id], teamB: [p3.id, p4.id], winner: null, scoreA: null, scoreB: null },
+        ],
+        resting: [],
+      });
+      setMatchWinner(stored.matches[0].id, winner);
+    }
+  };
+
+  const earlier = createSession({
+    name: 'Earlier night', mode: 'doubles', strategy: 'mixed', courts: 1, playerIds: ids,
+  });
+  playTwo(earlier, 'B'); // p3+p4 sweep, so p1/p2 arrive at the next session on 0%
+  endSession(earlier);
+
+  const later = createSession({
+    name: 'Later night', mode: 'doubles', strategy: 'mixed', courts: 1, playerIds: ids,
+  });
+  playTwo(later, 'A'); // the result flips
+
+  const table = sessionStandings(later);
+  check('standings cover everyone who played the session', table.length === 4);
+
+  const one = table.find((s) => s.player.id === p1.id)!;
+  const three = table.find((s) => s.player.id === p3.id)!;
+
+  check('session record is scoped to that session', one.wins === 2 && one.losses === 0);
+  check('session win rate ignores other sessions', one.winRate === 1);
+  check('prior form is read from earlier sessions only', one.priorWinRate === 0);
+  check('improving shows as a positive delta', one.deltaPct === 100, `got ${one.deltaPct}`);
+  check('falling off shows as a negative delta', three.deltaPct === -100, `got ${three.deltaPct}`);
+  check('winners are ranked above losers', table[0].wins > table[table.length - 1].wins);
+
+  const earlierTable = sessionStandings(earlier);
+  check(
+    'an earlier session is unaffected by later results',
+    earlierTable.find((s) => s.player.id === p1.id)?.wins === 0
+  );
+  check(
+    'a first session has no prior form to compare against',
+    earlierTable.every((s) => s.priorWinRate === null && s.deltaPct === null)
+  );
+
+  // An unscored match is a game played, but must not move the win rate.
+  saveRound(later, {
+    number: 3,
+    matches: [
+      { court: 0, mode: 'doubles', teamA: [p1.id, p2.id], teamB: [p3.id, p4.id], winner: null, scoreA: null, scoreB: null },
+    ],
+    resting: [],
+  });
+  const undecided = sessionStandings(later).find((s) => s.player.id === p1.id)!;
+  check('an undecided match still counts as a game', undecided.games === 3);
+  check('an undecided match leaves the win rate alone', undecided.winRate === 1);
+
+  check('standings for a missing session come back empty', sessionStandings(999999).length === 0);
+}
+
+// --- match scores -----------------------------------------------------------
+
+{
+  const a1 = createPlayer('Score A1', 'intermediate');
+  const a2 = createPlayer('Score A2', 'intermediate');
+  const b1 = createPlayer('Score B1', 'intermediate');
+  const b2 = createPlayer('Score B2', 'intermediate');
+  const sid = createSession({
+    name: 'Scored night', mode: 'doubles', strategy: 'mixed', courts: 1,
+    playerIds: [a1.id, a2.id, b1.id, b2.id],
+  });
+
+  const play = (number: number) =>
+    saveRound(sid, {
+      number,
+      matches: [
+        { court: 0, mode: 'doubles', teamA: [a1.id, a2.id], teamB: [b1.id, b2.id], winner: null, scoreA: null, scoreB: null },
+      ],
+      resting: [],
+    });
+
+  const first = play(1);
+  check('a new match starts with no score', first.matches[0].scoreA === null);
+
+  setMatchScore(first.matches[0].id, 11, 8);
+  const scored = loadRounds(sid)[0].matches[0];
+  check('scores round-trip through the database', scored.scoreA === 11 && scored.scoreB === 8);
+  check('the winner is derived from the score', scored.winner === 'A');
+
+  // Half a score is a legitimate intermediate state while typing.
+  setMatchScore(first.matches[0].id, 11, null);
+  const half = loadRounds(sid)[0].matches[0];
+  check('a half-entered score decides nothing', half.winner === null && half.scoreA === 11);
+
+  // A tie is recorded but settles nothing.
+  setMatchScore(first.matches[0].id, 9, 9);
+  check('a tied score leaves the match undecided', loadRounds(sid)[0].matches[0].winner === null);
+
+  setMatchScore(first.matches[0].id, 7, 11);
+  check('the lower score loses', loadRounds(sid)[0].matches[0].winner === 'B');
+
+  // Tapping the cup after a score must not leave the two disagreeing.
+  setMatchWinner(first.matches[0].id, 'A');
+  const cleared = loadRounds(sid)[0].matches[0];
+  check(
+    'recording a bare win clears any stored score',
+    cleared.winner === 'A' && cleared.scoreA === null && cleared.scoreB === null
+  );
+
+  // Points feed the standings.
+  setMatchScore(first.matches[0].id, 11, 8);
+  const table = sessionStandings(sid);
+  const winner = table.find((s) => s.player.id === a1.id)!;
+  const loser = table.find((s) => s.player.id === b1.id)!;
+  check('points for/against follow the player\'s side', winner.pointsFor === 11 && winner.pointsAgainst === 8);
+  check('the losing side sees the mirror image', loser.pointsFor === 8 && loser.pointsAgainst === 11);
+  check('point difference is signed', winner.pointDiff === 3 && loser.pointDiff === -3);
+  check('scoredGames counts only matches carrying a score', winner.scoredGames === 1);
+
+  // A bare win contributes no phantom 0-0.
+  const second = play(2);
+  setMatchWinner(second.matches[0].id, 'A');
+  const afterBare = sessionStandings(sid).find((s) => s.player.id === a1.id)!;
+  check('a bare win adds no points', afterBare.pointsFor === 11 && afterBare.pointsAgainst === 8);
+  check('but it still counts as a game and a win', afterBare.games === 2 && afterBare.wins === 2);
+  check('scoredGames ignores the unscored win', afterBare.scoredGames === 1);
+
+  // Equal wins must be separated by point difference, which is the whole
+  // reason scores exist.
+  const third = play(3);
+  setMatchScore(third.matches[0].id, 11, 2);
+  const ranked = sessionStandings(sid);
+  check('everyone on this court has the same games played', ranked.every((s) => s.games === 3));
+  check(
+    'wins rank first, point difference breaks the tie',
+    ranked[0].pointDiff >= ranked[1].pointDiff && ranked[0].wins >= ranked[ranked.length - 1].wins
+  );
+  const winners = ranked.filter((s) => s.wins === 3);
+  check('both winners are ahead of both losers', winners.length === 2 && ranked.slice(0, 2).every((s) => s.wins === 3));
+
+  const allTime = playerStats().find((s) => s.player.id === a1.id)!;
+  check('the all-time table carries points too', allTime.pointsFor === 22 && allTime.pointsAgainst === 10);
+
+  deleteSession(sid);
+}
+
+// --- removing a player mid-session ------------------------------------------
+
+{
+  const keep1 = createPlayer('Stay One', 'intermediate');
+  const keep2 = createPlayer('Stay Two', 'intermediate');
+  const keep3 = createPlayer('Stay Three', 'intermediate');
+  const leaver = createPlayer('Leaver', 'intermediate');
+  const sid = createSession({
+    name: 'Someone leaves', mode: 'doubles', strategy: 'mixed', courts: 1,
+    playerIds: [keep1.id, keep2.id, keep3.id, leaver.id],
+  });
+
+  const round = saveRound(sid, {
+    number: 1,
+    matches: [
+      { court: 0, mode: 'doubles', teamA: [keep1.id, leaver.id], teamB: [keep2.id, keep3.id], winner: null, scoreA: null, scoreB: null },
+    ],
+    resting: [],
+  });
+  setMatchScore(round.matches[0].id, 11, 6);
+
+  check('roster starts at 4', getSessionRoster(sid).length === 4);
+
+  removePlayerFromSession(sid, leaver.id);
+  check('the removed player leaves the rotation', getSessionRoster(sid).length === 3);
+  check('and is not on the roster', !getSessionRoster(sid).some((p) => p.id === leaver.id));
+  check('everyone else stays', getSessionRoster(sid).some((p) => p.id === keep1.id));
+
+  // Their finished game has to survive, or the standings would silently
+  // rewrite results that already happened.
+  const stillThere = loadRounds(sid)[0].matches[0];
+  check('the match they already played is untouched', stillThere.teamA.includes(leaver.id));
+  const standing = sessionStandings(sid).find((s) => s.player.id === leaver.id);
+  check('they keep their result in the standings', standing?.wins === 1 && standing?.pointsFor === 11);
+
+  // Removing someone twice, or removing a stranger, must be a no-op.
+  removePlayerFromSession(sid, leaver.id);
+  check('removing twice is harmless', getSessionRoster(sid).length === 3);
+  removePlayerFromSession(sid, 999999);
+  check('removing an unknown player is harmless', getSessionRoster(sid).length === 3);
+
+  deleteSession(sid);
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);

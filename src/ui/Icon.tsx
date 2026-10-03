@@ -28,7 +28,11 @@ export type IconName =
   | 'feedback'
   | 'tutorial'
   | 'link'
-  | 'unlink';
+  | 'unlink'
+  | 'trendUp'
+  | 'trendDown'
+  | 'search'
+  | 'more';
 
 const GLYPH: Record<IconName, React.ComponentProps<typeof Ionicons>['name']> = {
   play: 'tennisball',
@@ -48,6 +52,10 @@ const GLYPH: Record<IconName, React.ComponentProps<typeof Ionicons>['name']> = {
   tutorial: 'book-outline',
   link: 'link',
   unlink: 'unlink',
+  trendUp: 'trending-up',
+  trendDown: 'trending-down',
+  search: 'search',
+  more: 'ellipsis-horizontal',
 };
 
 export function Icon({

@@ -1,6 +1,7 @@
 import { useFocusEffect } from 'expo-router';
 import React, { useCallback, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { TIERS, TIER_LABEL, Player, Tier } from '../../src/domain/types';
 
 /** Cycles a tier forward, wrapping past Advanced back to Beginner. */
@@ -35,10 +36,13 @@ import {
   Muted,
   Row,
   Screen,
+  SearchField,
   Segmented,
   TierBadge,
   Title,
+  matchesSearch,
 } from '../../src/ui/components';
+import { panelIn, panelOut, rowLayout } from '../../src/ui/motion';
 import { Icon } from '../../src/ui/Icon';
 import { themedStyles, useTheme } from '../../src/ui/ThemeContext';
 import { font, radius, space } from '../../src/ui/theme';
@@ -50,6 +54,7 @@ export default function PlayersScreen() {
   const { c } = useTheme();
   const [players, setPlayers] = useState<Player[]>([]);
   const [showArchived, setShowArchived] = useState(false);
+  const [query, setQuery] = useState('');
 
   const [name, setName] = useState('');
   const [manualTier, setManualTier] = useState<Tier>('intermediate');
@@ -66,7 +71,11 @@ export default function PlayersScreen() {
   }, []);
   useFocusEffect(useCallback(() => refresh(), [refresh]));
 
-  const visible = players.filter((p) => (showArchived ? true : !p.archived));
+  const visible = players.filter(
+    (p) => (showArchived ? true : !p.archived) && matchesSearch(p.name, query)
+  );
+  const activeCount = players.filter((p) => !p.archived).length;
+  const searching = query.trim() !== '';
 
   const resetForm = () => {
     setName('');
@@ -211,7 +220,8 @@ export default function PlayersScreen() {
       </Card>
 
       {linkingPlayer ? (
-        <Card style={{ marginTop: space.lg }}>
+        <Animated.View entering={panelIn} exiting={panelOut}>
+          <Card style={{ marginTop: space.lg }}>
           <Heading>Fixed partner for {linkingPlayer.name}</Heading>
           <Muted>
             Linked players always play together in doubles - the fairness engine seats them as a
@@ -267,14 +277,15 @@ export default function PlayersScreen() {
                 );
               })
           )}
-          <View style={{ height: space.sm }} />
-          <Button label="Cancel" variant="ghost" onPress={() => setLinkingId(null)} />
-        </Card>
+            <View style={{ height: space.sm }} />
+            <Button label="Cancel" variant="ghost" onPress={() => setLinkingId(null)} />
+          </Card>
+        </Animated.View>
       ) : null}
 
       <Row style={{ justifyContent: 'space-between', marginTop: space.xl }}>
         <Heading>
-          {visible.filter((p) => !p.archived).length} active
+          {searching ? `${visible.length} of ${activeCount}` : `${activeCount} active`}
         </Heading>
         <LinkButton
           label={showArchived ? 'Hide archived' : 'Show archived'}
@@ -284,15 +295,28 @@ export default function PlayersScreen() {
         />
       </Row>
 
+      {players.length > 0 ? (
+        <View style={{ marginTop: space.sm, marginBottom: space.xs }}>
+          <SearchField value={query} onChangeText={setQuery} />
+        </View>
+      ) : null}
+
       {visible.length === 0 ? (
-        <EmptyState
-          title="No players yet"
-          body="Add everyone who plays regularly. You pick who's actually here when you start a session."
-        />
+        searching ? (
+          <EmptyState
+            title={`No one matches "${query.trim()}"`}
+            body="Check the spelling, or clear the search to see the whole roster again."
+          />
+        ) : (
+          <EmptyState
+            title="No players yet"
+            body="Add everyone who plays regularly. You pick who's actually here when you start a session."
+          />
+        )
       ) : (
         <Grid>
           {visible.map((p) => (
-            <GridCell key={p.id} columns={r.playerColumns}>
+            <GridCell key={p.id} columns={r.playerColumns} layout={rowLayout}>
               <Card tone="alt" style={{ padding: space.md, opacity: p.archived ? 0.5 : 1 }}>
                 {/* Name + tier sit on their own line so the name always has the
                     full card width - the action buttons below never squeeze it. */}

@@ -6,7 +6,7 @@
  * statements. Entry N upgrades a database from version N to N+1.
  */
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export const migrations: string[][] = [
   // 0 -> 1 : initial schema
@@ -117,6 +117,17 @@ export const migrations: string[][] = [
   // derive an effective tier, so a player without a rating keeps working off
   // their manually set tier.
   [`ALTER TABLE players ADD COLUMN dupr REAL;`],
+  // 6 -> 7 : optional per-match scores.
+  //
+  // Migration 2->3 dropped the original score columns because nothing consumed
+  // the margin. Points now break ties in the standings, so they're back - but
+  // deliberately as an *optional* detail alongside `winner` rather than a
+  // replacement for it. Tapping the cup is still one tap and leaves these
+  // NULL; typing a score fills them in and derives the winner from them.
+  [
+    `ALTER TABLE matches ADD COLUMN score_a INTEGER;`,
+    `ALTER TABLE matches ADD COLUMN score_b INTEGER;`,
+  ],
 ];
 
 /** Applies any migrations the database hasn't seen yet. */

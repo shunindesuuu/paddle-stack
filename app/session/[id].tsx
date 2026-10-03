@@ -7,6 +7,7 @@ import {
   getSession,
   getSessionRoster,
   loadRounds,
+  sessionStandings,
 } from '../../src/db/repo';
 import { STRATEGY_LABEL } from '../../src/pairing/engine';
 import { Icon } from '../../src/ui/Icon';
@@ -22,6 +23,7 @@ import {
   Screen,
   Title,
 } from '../../src/ui/components';
+import { STANDINGS_HINT, Standings } from '../../src/ui/Standings';
 import { themedStyles, useTheme } from '../../src/ui/ThemeContext';
 import { font, space } from '../../src/ui/theme';
 import { useResponsive } from '../../src/ui/useResponsive';
@@ -39,6 +41,7 @@ export default function SessionDetail() {
   const session = useMemo(() => (Number.isFinite(sessionId) ? getSession(sessionId) : null), [sessionId]);
   const rounds = useMemo(() => (session ? loadRounds(session.id) : []), [session]);
   const roster = useMemo(() => (session ? getSessionRoster(session.id) : []), [session]);
+  const standings = useMemo(() => (session ? sessionStandings(session.id) : []), [session]);
   const byId = useMemo(() => new Map(roster.map((p) => [p.id, p])), [roster]);
 
   if (!session) {
@@ -75,6 +78,14 @@ export default function SessionDetail() {
           {STRATEGY_LABEL[session.strategy]} · {roster.length} players
         </Muted>
 
+        {standings.length > 0 ? (
+          <View style={{ marginTop: space.lg }}>
+            <Heading>Standings</Heading>
+            <Muted>{STANDINGS_HINT}</Muted>
+            <Standings standings={standings} />
+          </View>
+        ) : null}
+
         {rounds.length === 0 ? (
           <EmptyState title="No rounds played" body="This session ended before any matchups were generated." />
         ) : (
@@ -86,11 +97,15 @@ export default function SessionDetail() {
                   const side = (team: 'A' | 'B') => {
                     const won = m.winner === team;
                     const ids = team === 'A' ? m.teamA : m.teamB;
+                    const score = team === 'A' ? m.scoreA : m.scoreB;
                     return (
-                      <Row style={{ justifyContent: 'space-between' }}>
+                      <Row style={{ justifyContent: 'space-between' }} gap={space.sm}>
                         <Text style={[styles.team, won && styles.won]} numberOfLines={2}>
                           {ids.map(name).join(' & ')}
                         </Text>
+                        {score != null ? (
+                          <Text style={[styles.score, won && styles.scoreWon]}>{score}</Text>
+                        ) : null}
                         {won ? <Icon name="trophy" size={15} color={c.accentInk} /> : null}
                       </Row>
                     );
@@ -136,4 +151,6 @@ const useStyles = themedStyles(({ c, font, family }) => ({
     paddingRight: space.sm,
   },
   won: { color: c.text, fontFamily: family.semibold },
+  score: { color: c.textDim, fontSize: font.md, fontFamily: family.display },
+  scoreWon: { color: c.accentInk },
 }));

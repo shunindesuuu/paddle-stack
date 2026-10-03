@@ -17,6 +17,7 @@ import {
   emptyHistory,
   pairKey,
   tierFromDupr,
+  winnerFromScores,
 } from '../domain/types';
 import { Strategy } from '../pairing/engine';
 import { db } from './driver';
@@ -361,6 +362,22 @@ export function getSessionRoster(sessionId: number): Player[] {
     .map((r) => toPlayer(r, dupr));
 }
 
+/**
+ * Drops one player out of the rotation for the rest of a session.
+ *
+ * Only the roster row goes - every match they already played stays, so the
+ * standings and history keep counting them. A match currently on court that
+ * they're part of is likewise left alone; pulling a name out of a live
+ * line-up would leave a court short mid-game, so removal takes effect from
+ * the next round the engine builds.
+ */
+export function removePlayerFromSession(sessionId: number, playerId: number): void {
+  db.runSync('DELETE FROM session_players WHERE session_id = ? AND player_id = ?;', [
+    sessionId,
+    playerId,
+  ]);
+}
+
 export function setSessionRoster(sessionId: number, playerIds: number[]): void {
   db.withTransactionSync(() => {
     db.runSync('DELETE FROM session_players WHERE session_id = ?;', [sessionId]);
@@ -391,8 +408,8 @@ export function saveRound(sessionId: number, round: Round): StoredRound {
 
     for (const m of round.matches) {
       const mr = db.runSync(
-        'INSERT INTO matches (round_id, court, mode, winner) VALUES (?, ?, ?, ?);',
-        [roundId, m.court, m.mode, m.winner]
+        'INSERT INTO matches (round_id, court, mode, winner, score_a, score_b) VALUES (?, ?, ?, ?, ?, ?);',
+        [roundId, m.court, m.mode, m.winner, m.scoreA, m.scoreB]
       );
       const matchId = mr.lastInsertRowId;
       m.teamA.forEach((pid, slot) =>
@@ -452,8 +469,34 @@ export function updateRoundLineups(stored: StoredRound, round: Round): void {
   });
 }
 
+/**
+ * Records a bare win. Any score already on the match is cleared: a stored
+ * 11-8 that disagreed with the winner would be worse than no score at all,
+ * and re-tapping the cup is the natural way to undo a mistyped score.
+ */
 export function setMatchWinner(matchId: number, winner: Team | null): void {
-  db.runSync('UPDATE matches SET winner = ? WHERE id = ?;', [winner, matchId]);
+  db.runSync('UPDATE matches SET winner = ?, score_a = NULL, score_b = NULL WHERE id = ?;', [
+    winner,
+    matchId,
+  ]);
+}
+
+/**
+ * Records points, deriving the winner from them so the two can never disagree.
+ * A tie or a half-filled score stores the points but leaves the match
+ * undecided, which is what lets someone type one side's score first.
+ */
+export function setMatchScore(
+  matchId: number,
+  scoreA: number | null,
+  scoreB: number | null
+): void {
+  db.runSync('UPDATE matches SET score_a = ?, score_b = ?, winner = ? WHERE id = ?;', [
+    scoreA,
+    scoreB,
+    winnerFromScores(scoreA, scoreB),
+    matchId,
+  ]);
 }
 
 /**
@@ -487,6 +530,8 @@ export function loadRounds(sessionId: number): StoredRound[] {
     court: number;
     mode: MatchMode;
     winner: Team | null;
+    score_a: number | null;
+    score_b: number | null;
   }>(
     `SELECT m.* FROM matches m
      JOIN rounds r ON r.id = m.round_id
@@ -537,6 +582,8 @@ export function loadRounds(sessionId: number): StoredRound[] {
       teamA: teams.A,
       teamB: teams.B,
       winner: m.winner,
+      scoreA: m.score_a,
+      scoreB: m.score_b,
     });
     matchesByRound.set(m.round_id, list);
   }
@@ -599,7 +646,65 @@ export type PlayerStats = {
   games: number;
   wins: number;
   losses: number;
+  /** Points scored by this player's side, across matches that recorded a score. */
+  pointsFor: number;
+  pointsAgainst: number;
+  /** pointsFor - pointsAgainst. The standings' first tiebreak after wins. */
+  pointDiff: number;
+  /** How many of `games` actually carried a score, so the UI can hide empty point columns. */
+  scoredGames: number;
 };
+
+/**
+ * Win/loss/points aggregates, shared verbatim by the all-time table and the
+ * per-session standings so the two can never disagree about how a match
+ * counts. Matches recorded as a bare win contribute nothing to the point
+ * totals rather than a phantom 0-0.
+ */
+const RESULT_AGGREGATES = `
+  COUNT(mp.match_id) AS games,
+  SUM(CASE WHEN m.winner IS NOT NULL AND m.winner = mp.team THEN 1 ELSE 0 END) AS wins,
+  SUM(CASE WHEN m.winner IS NOT NULL AND m.winner <> mp.team THEN 1 ELSE 0 END) AS losses,
+  SUM(CASE WHEN m.score_a IS NOT NULL AND m.score_b IS NOT NULL
+           THEN (CASE WHEN mp.team = 'A' THEN m.score_a ELSE m.score_b END)
+           ELSE 0 END) AS points_for,
+  SUM(CASE WHEN m.score_a IS NOT NULL AND m.score_b IS NOT NULL
+           THEN (CASE WHEN mp.team = 'A' THEN m.score_b ELSE m.score_a END)
+           ELSE 0 END) AS points_against,
+  SUM(CASE WHEN m.score_a IS NOT NULL AND m.score_b IS NOT NULL THEN 1 ELSE 0 END) AS scored_games
+`;
+
+/**
+ * Wins first, then point difference. Ranking on wins alone bunches everyone
+ * who went 2-0 onto the same line, which is exactly what recording scores is
+ * meant to separate.
+ */
+const RESULT_ORDER = `
+  ORDER BY wins DESC, (points_for - points_against) DESC, games DESC, p.name COLLATE NOCASE
+`;
+
+type ResultRow = {
+  games: number;
+  wins: number | null;
+  losses: number | null;
+  points_for: number | null;
+  points_against: number | null;
+  scored_games: number | null;
+};
+
+function resultTotals(r: ResultRow) {
+  const pointsFor = r.points_for ?? 0;
+  const pointsAgainst = r.points_against ?? 0;
+  return {
+    games: r.games,
+    wins: r.wins ?? 0,
+    losses: r.losses ?? 0,
+    pointsFor,
+    pointsAgainst,
+    pointDiff: pointsFor - pointsAgainst,
+    scoredGames: r.scored_games ?? 0,
+  };
+}
 
 /**
  * Win/loss totals across all sessions, for the History tab.
@@ -607,23 +712,97 @@ export type PlayerStats = {
  * nor a loss.
  */
 export function playerStats(): PlayerStats[] {
-  const rows = db.getAllSync<PlayerRow & { games: number; wins: number; losses: number }>(
-    `SELECT p.*,
-            COUNT(mp.match_id) AS games,
-            SUM(CASE WHEN m.winner IS NOT NULL AND m.winner = mp.team THEN 1 ELSE 0 END) AS wins,
-            SUM(CASE WHEN m.winner IS NOT NULL AND m.winner <> mp.team THEN 1 ELSE 0 END) AS losses
+  const rows = db.getAllSync<PlayerRow & ResultRow>(
+    `SELECT p.*, ${RESULT_AGGREGATES}
      FROM players p
      JOIN match_players mp ON mp.player_id = p.id
      JOIN matches m ON m.id = mp.match_id
      GROUP BY p.id
-     ORDER BY wins DESC, games DESC, p.name COLLATE NOCASE;`
+     ${RESULT_ORDER};`
   );
 
   const dupr = getDuprSettings();
-  return rows.map((r) => ({
-    player: toPlayer(r, dupr),
-    games: r.games,
-    wins: r.wins ?? 0,
-    losses: r.losses ?? 0,
-  }));
+  return rows.map((r) => ({ player: toPlayer(r, dupr), ...resultTotals(r) }));
+}
+
+export type SessionStanding = {
+  player: Player;
+  games: number;
+  wins: number;
+  losses: number;
+  pointsFor: number;
+  pointsAgainst: number;
+  pointDiff: number;
+  scoredGames: number;
+  /** Win rate this session, 0..1. Null until a match here has a winner. */
+  winRate: number | null;
+  /** Win rate over every session that started before this one, or null for a first-timer. */
+  priorWinRate: number | null;
+  /** Change in win rate versus `priorWinRate`, in percentage points. Null when either side is unknown. */
+  deltaPct: number | null;
+};
+
+/**
+ * Leaderboard for a single session.
+ *
+ * The all-time table can't answer "who played well tonight?" - a strong
+ * regular sits top of it no matter how the evening actually went. This scores
+ * just this session, and pairs it with each player's form beforehand so an
+ * unusually good (or rough) night is visible as a delta rather than having to
+ * be inferred.
+ */
+export function sessionStandings(sessionId: number): SessionStanding[] {
+  const session = getSession(sessionId);
+  if (!session) return [];
+
+  const rows = db.getAllSync<PlayerRow & ResultRow>(
+    `SELECT p.*, ${RESULT_AGGREGATES}
+     FROM players p
+     JOIN match_players mp ON mp.player_id = p.id
+     JOIN matches m ON m.id = mp.match_id
+     JOIN rounds r ON r.id = m.round_id
+     WHERE r.session_id = ?
+     GROUP BY p.id
+     ${RESULT_ORDER};`,
+    [sessionId]
+  );
+
+  // "Before this one" is ordered by start time, with the id as a tiebreak so
+  // two sessions started in the same second still resolve deterministically.
+  const priorRows = db.getAllSync<{ player_id: number; wins: number; losses: number }>(
+    `SELECT mp.player_id AS player_id,
+            SUM(CASE WHEN m.winner IS NOT NULL AND m.winner = mp.team THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN m.winner IS NOT NULL AND m.winner <> mp.team THEN 1 ELSE 0 END) AS losses
+     FROM match_players mp
+     JOIN matches m ON m.id = mp.match_id
+     JOIN rounds r ON r.id = m.round_id
+     JOIN sessions s ON s.id = r.session_id
+     WHERE s.id <> ?
+       AND (s.started_at < ? OR (s.started_at = ? AND s.id < ?))
+     GROUP BY mp.player_id;`,
+    [sessionId, session.startedAt, session.startedAt, sessionId]
+  );
+
+  const prior = new Map(priorRows.map((r) => [r.player_id, r]));
+  const dupr = getDuprSettings();
+
+  return rows.map((r) => {
+    const totals = resultTotals(r);
+    const decided = totals.wins + totals.losses;
+    const winRate = decided > 0 ? totals.wins / decided : null;
+
+    const before = prior.get(r.id);
+    const priorWins = before?.wins ?? 0;
+    const priorDecided = priorWins + (before?.losses ?? 0);
+    const priorWinRate = priorDecided > 0 ? priorWins / priorDecided : null;
+
+    return {
+      player: toPlayer(r, dupr),
+      ...totals,
+      winRate,
+      priorWinRate,
+      deltaPct:
+        winRate != null && priorWinRate != null ? Math.round((winRate - priorWinRate) * 100) : null,
+    };
+  });
 }

@@ -14,6 +14,7 @@ import {
   Title,
 } from '../../src/ui/components';
 import { Icon } from '../../src/ui/Icon';
+import { formatDiff } from '../../src/ui/Standings';
 import { themedStyles, useTheme } from '../../src/ui/ThemeContext';
 import { font, radius, space } from '../../src/ui/theme';
 
@@ -84,7 +85,10 @@ export default function HistoryScreen() {
       ) : (
         <View style={{ marginTop: space.lg }}>
           <Heading>All-time record</Heading>
-          <Muted>Only matches with a recorded winner count toward wins and losses.</Muted>
+          <Muted>
+            Ranked by wins, then point difference. Only matches with a recorded winner count
+            toward wins and losses.
+          </Muted>
           <View style={{ marginTop: space.md, gap: space.sm }}>
             {stats.map((s, i) => {
               const decided = s.wins + s.losses;
@@ -103,6 +107,9 @@ export default function HistoryScreen() {
                       <View style={{ height: 2 }} />
                       <Muted>
                         {s.games} game{s.games === 1 ? '' : 's'} · {s.wins}W {s.losses}L
+                        {s.scoredGames > 0
+                          ? ` · ${s.pointsFor}-${s.pointsAgainst} (${formatDiff(s.pointDiff)})`
+                          : ''}
                       </Muted>
                     </View>
                     <Text style={styles.pct}>{pct == null ? '—' : `${pct}%`}</Text>

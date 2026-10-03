@@ -203,7 +203,7 @@ const teamW = (ids: number[]) => ids.reduce((n, id) => n + w(id), 0);
     const solo: Round = {
       number: 1,
       matches: [
-        { court: 1, mode: 'doubles', teamA: [101, 102], teamB: [103, 104], winner: null },
+        { court: 1, mode: 'doubles', teamA: [101, 102], teamB: [103, 104], winner: null, scoreA: null, scoreB: null },
       ],
       resting: [],
     };
@@ -222,7 +222,7 @@ const teamW = (ids: number[]) => ids.reduce((n, id) => n + w(id), 0);
   let h = emptyHistory();
   h = applyRoundToHistory({
     number: 1,
-    matches: [{ court: 0, mode: 'doubles', teamA: [1, 2], teamB: [3, 4], winner: null }],
+    matches: [{ court: 0, mode: 'doubles', teamA: [1, 2], teamB: [3, 4], winner: null, scoreA: null, scoreB: null }],
     resting: [],
   }, h);
   check('partner recorded once', h.partnerCount.get('1:2') === 1);
